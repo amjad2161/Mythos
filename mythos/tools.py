@@ -220,7 +220,10 @@ def _tool_read_file(path: str) -> str:
         with open(path, "r", encoding="utf-8", errors="replace") as fh:
             data = fh.read(_MAX_READ_BYTES + 1)
         if len(data) > _MAX_READ_BYTES:
-            return _truncate(data, _MAX_READ_BYTES)
+            # Only a bounded prefix is read, so the true file size is unknown;
+            # state the cap rather than claim an omitted count we cannot know.
+            notice = f"\n… [truncated: file exceeds {_MAX_READ_BYTES} characters]"
+            return data[: _MAX_READ_BYTES - len(notice)] + notice
         return data
     except OSError as exc:
         return f"ERROR: {exc}"

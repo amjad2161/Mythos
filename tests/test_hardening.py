@@ -87,7 +87,9 @@ class TestOutputCaps:
         big.write_text("x" * 300_000, encoding="utf-8")
         out = _tool_read_file(str(big))
         assert len(out) <= _MAX_TOOL_OUTPUT_CHARS
-        assert "truncated" in out
+        # Only a prefix of the file is read, so the notice must state the cap
+        # rather than claim an exact omitted count it cannot know.
+        assert "truncated: file exceeds" in out
 
 
 class TestRegistryArgGuard:
