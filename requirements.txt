@@ -1,2 +1,5 @@
+# Core dependency (default Claude backend)
 anthropic>=0.20.0
-openai>=1.0.0
+
+# Optional: OpenAI backend. Install with `pip install -e ".[openai]"`
+# openai>=1.0.0

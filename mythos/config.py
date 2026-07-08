@@ -16,12 +16,14 @@ class MythosConfig:
 
     # LLM backend settings
     llm_provider: str = "anthropic"       # "anthropic" | "openai" | "stub"
-    llm_model: str = "claude-opus-4-5"
+    llm_model: str = "claude-opus-4-8"
     llm_api_key: Optional[str] = field(
         default_factory=lambda: os.getenv("MYTHOS_API_KEY") or os.getenv("ANTHROPIC_API_KEY")
     )
+    # Sampling temperature. Applies to the OpenAI backend; current Claude models
+    # reject sampling parameters, so the Anthropic backend ignores it.
     llm_temperature: float = 0.2
-    llm_max_tokens: int = 4096
+    llm_max_tokens: int = 8192
 
     # Agent loop settings
     max_iterations: int = 50             # hard cap on autonomous iterations
@@ -41,10 +43,10 @@ class MythosConfig:
         """Build a config from environment variables."""
         return cls(
             llm_provider=os.getenv("MYTHOS_LLM_PROVIDER", "anthropic"),
-            llm_model=os.getenv("MYTHOS_LLM_MODEL", "claude-opus-4-5"),
+            llm_model=os.getenv("MYTHOS_LLM_MODEL", "claude-opus-4-8"),
             llm_api_key=os.getenv("MYTHOS_API_KEY") or os.getenv("ANTHROPIC_API_KEY"),
             llm_temperature=float(os.getenv("MYTHOS_LLM_TEMPERATURE", "0.2")),
-            llm_max_tokens=int(os.getenv("MYTHOS_LLM_MAX_TOKENS", "4096")),
+            llm_max_tokens=int(os.getenv("MYTHOS_LLM_MAX_TOKENS", "8192")),
             max_iterations=int(os.getenv("MYTHOS_MAX_ITERATIONS", "50")),
             max_consecutive_failures=int(os.getenv("MYTHOS_MAX_FAILURES", "5")),
             reflection_interval=int(os.getenv("MYTHOS_REFLECTION_INTERVAL", "5")),

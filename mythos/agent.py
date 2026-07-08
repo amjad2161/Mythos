@@ -153,12 +153,16 @@ class MythosAgent:
             print(f"  Goal: {goal}")
             print(f"{'='*60}\n")
 
+        # Reset per-run state so a reused agent starts each goal cleanly
+        # (fresh iteration/failure counters, no leftover system prompt).
+        self._monitor.reset()
+
         # Create initial plan
         plan = self._planner.new_plan(goal)
 
         # Build and inject system prompt
         system_prompt = self._build_system_prompt(plan)
-        self._memory.clear_short_term()
+        self._memory.reset_short_term()
         self._memory.add_message("system", system_prompt)
         self._memory.add_message("user", f"Goal: {goal}")
 

@@ -14,14 +14,27 @@ LLM APIs and as a simple callable-by-name dispatch table.
 """
 from __future__ import annotations
 
+import ast
 import datetime
-import json
 import math
+import operator
 import os
 import subprocess
-import sys
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
+
+# Guard rails: tool output that flows back into the LLM context is capped so a
+# single command (e.g. `cat huge.log`) cannot exhaust the context window.
+_MAX_TOOL_OUTPUT_CHARS = 20_000
+_MAX_READ_BYTES = 200_000
+
+
+def _truncate(text: str, limit: int = _MAX_TOOL_OUTPUT_CHARS) -> str:
+    """Cap *text* to *limit* characters, appending a truncation notice."""
+    if len(text) <= limit:
+        return text
+    omitted = len(text) - limit
+    return text[:limit] + f"\n… [truncated {omitted} characters]"
 
 
 # ---------------------------------------------------------------------------
@@ -87,6 +100,8 @@ class ToolRegistry:
         tool = self.get(name)
         if tool is None:
             return f"ERROR: Unknown tool '{name}'"
+        if not isinstance(arguments, dict):
+            return f"ERROR: tool arguments must be an object, got {type(arguments).__name__}"
         return tool.call(**arguments)
 
 
@@ -99,27 +114,79 @@ def _tool_current_time() -> str:
     return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
 
+# Whitelisted callables and constants for the calculator.  Only these names are
+# reachable — the evaluator walks the AST and rejects anything else, so tricks
+# like ``(1).__class__`` or ``__import__('os')`` never execute.
+_MATH_FUNCS: Dict[str, Any] = {
+    k: getattr(math, k) for k in dir(math) if not k.startswith("_") and callable(getattr(math, k))
+}
+_MATH_CONSTS: Dict[str, Any] = {
+    k: getattr(math, k) for k in dir(math) if not k.startswith("_") and not callable(getattr(math, k))
+}
+_ALLOWED_FUNCS: Dict[str, Any] = {**_MATH_FUNCS, "abs": abs, "round": round, "min": min, "max": max}
+_ALLOWED_CONSTS: Dict[str, Any] = dict(_MATH_CONSTS)
+
+_BIN_OPS = {
+    ast.Add: operator.add,
+    ast.Sub: operator.sub,
+    ast.Mult: operator.mul,
+    ast.Div: operator.truediv,
+    ast.FloorDiv: operator.floordiv,
+    ast.Mod: operator.mod,
+    ast.Pow: operator.pow,
+}
+_UNARY_OPS = {ast.UAdd: operator.pos, ast.USub: operator.neg}
+
+
+def _eval_node(node: ast.AST) -> Any:
+    """Recursively evaluate a whitelisted arithmetic AST node."""
+    if isinstance(node, ast.Expression):
+        return _eval_node(node.body)
+    if isinstance(node, ast.Constant):
+        if isinstance(node.value, (int, float)):
+            return node.value
+        raise ValueError("only numeric literals are allowed")
+    if isinstance(node, ast.BinOp) and type(node.op) in _BIN_OPS:
+        return _BIN_OPS[type(node.op)](_eval_node(node.left), _eval_node(node.right))
+    if isinstance(node, ast.UnaryOp) and type(node.op) in _UNARY_OPS:
+        return _UNARY_OPS[type(node.op)](_eval_node(node.operand))
+    if isinstance(node, ast.Name):
+        if node.id in _ALLOWED_CONSTS:
+            return _ALLOWED_CONSTS[node.id]
+        raise ValueError(f"unknown name: {node.id!r}")
+    if isinstance(node, ast.Call):
+        if not isinstance(node.func, ast.Name) or node.func.id not in _ALLOWED_FUNCS:
+            raise ValueError("only whitelisted math functions may be called")
+        if node.keywords:
+            raise ValueError("keyword arguments are not supported")
+        return _ALLOWED_FUNCS[node.func.id](*[_eval_node(a) for a in node.args])
+    raise ValueError(f"unsupported expression element: {type(node).__name__}")
+
+
 def _tool_calculate(expression: str) -> str:
     """
     Safely evaluate a mathematical expression.
 
-    Only numeric operations and math functions are permitted.
+    The expression is parsed to an AST and evaluated with a strict whitelist of
+    numeric operators, math functions, and constants.  Attribute access, name
+    lookups outside the whitelist, comprehensions, and any other construct are
+    rejected, so this cannot be used to reach arbitrary Python objects.
     """
-    allowed_names: Dict[str, Any] = {k: getattr(math, k) for k in dir(math) if not k.startswith("_")}
-    allowed_names["abs"] = abs
-    allowed_names["round"] = round
     try:
-        result = eval(expression, {"__builtins__": {}}, allowed_names)  # noqa: S307
-        return str(result)
+        tree = ast.parse(expression, mode="eval")
+        return str(_eval_node(tree))
     except Exception as exc:  # noqa: BLE001
         return f"ERROR: {exc}"
 
 
 def _tool_read_file(path: str) -> str:
-    """Read and return the contents of a text file."""
+    """Read and return the contents of a text file (capped to protect context)."""
     try:
-        with open(path, "r", encoding="utf-8") as fh:
-            return fh.read()
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            data = fh.read(_MAX_READ_BYTES + 1)
+        if len(data) > _MAX_READ_BYTES:
+            return _truncate(data[:_MAX_READ_BYTES], _MAX_READ_BYTES)
+        return data
     except OSError as exc:
         return f"ERROR: {exc}"
 
@@ -155,7 +222,7 @@ def _tool_list_directory(path: str = ".") -> str:
             full = os.path.join(path, entry)
             kind = "DIR " if os.path.isdir(full) else "FILE"
             lines.append(f"{kind} {entry}")
-        return "\n".join(lines) if lines else "(empty directory)"
+        return _truncate("\n".join(lines)) if lines else "(empty directory)"
     except OSError as exc:
         return f"ERROR: {exc}"
 
@@ -169,6 +236,10 @@ def _tool_run_shell(command: str, timeout: int = 30) -> str:
     the agent's goal-alignment is expected to avoid destructive actions.
     """
     try:
+        timeout = max(1, int(timeout))
+    except (TypeError, ValueError):
+        timeout = 30
+    try:
         result = subprocess.run(
             command,
             shell=True,          # noqa: S602
@@ -176,8 +247,10 @@ def _tool_run_shell(command: str, timeout: int = 30) -> str:
             text=True,
             timeout=timeout,
         )
-        output = (result.stdout or "") + (result.stderr or "")
-        return output.strip() or "(no output)"
+        output = ((result.stdout or "") + (result.stderr or "")).strip()
+        if result.returncode != 0:
+            output = f"[exit code {result.returncode}]\n{output}".strip()
+        return _truncate(output) if output else "(no output)"
     except subprocess.TimeoutExpired:
         return f"ERROR: Command timed out after {timeout} seconds"
     except Exception as exc:  # noqa: BLE001
