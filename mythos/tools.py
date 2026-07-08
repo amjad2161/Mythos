@@ -25,16 +25,21 @@ from typing import Any, Callable, Dict, List, Optional
 
 # Guard rails: tool output that flows back into the LLM context is capped so a
 # single command (e.g. `cat huge.log`) cannot exhaust the context window.
+# read_file shares the same cap — a larger per-tool budget would defeat it.
 _MAX_TOOL_OUTPUT_CHARS = 20_000
-_MAX_READ_BYTES = 200_000
+_MAX_READ_BYTES = _MAX_TOOL_OUTPUT_CHARS
 
 
 def _truncate(text: str, limit: int = _MAX_TOOL_OUTPUT_CHARS) -> str:
-    """Cap *text* to *limit* characters, appending a truncation notice."""
+    """Cap *text* to at most *limit* characters, truncation notice included."""
     if len(text) <= limit:
         return text
-    omitted = len(text) - limit
-    return text[:limit] + f"\n… [truncated {omitted} characters]"
+    # Reserve room for the notice so the final string never exceeds *limit*;
+    # len(text) is an upper bound on the omitted count's digit width.
+    reserve = len(f"\n… [truncated {len(text)} characters]")
+    keep = max(0, limit - reserve)
+    suffix = f"\n… [truncated {len(text) - keep} characters]"
+    return text[:keep] + suffix if keep else suffix[:limit]
 
 
 # ---------------------------------------------------------------------------
@@ -137,6 +142,22 @@ _BIN_OPS = {
 }
 _UNARY_OPS = {ast.UAdd: operator.pos, ast.USub: operator.neg}
 
+# Complexity guards: expressions are model-supplied, so a pathological input
+# (huge exponents, factorial(10**8), deeply nested ops) must fail fast instead
+# of hanging the agent loop.
+_MAX_EXPR_CHARS = 10_000
+_MAX_AST_NODES = 200
+_MAX_POW_EXPONENT = 512
+_MAX_INT_BITS = 65_536  # ≈ 20k digits; larger intermediates abort evaluation
+_INT_ARG_LIMITS = {"factorial": 5_000, "comb": 10_000, "perm": 10_000}
+
+
+def _check_size(value: Any) -> Any:
+    """Reject integer intermediates too large to keep computing with cheaply."""
+    if isinstance(value, int) and value.bit_length() > _MAX_INT_BITS:
+        raise ValueError("result too large")
+    return value
+
 
 def _eval_node(node: ast.AST) -> Any:
     """Recursively evaluate a whitelisted arithmetic AST node."""
@@ -147,7 +168,11 @@ def _eval_node(node: ast.AST) -> Any:
             return node.value
         raise ValueError("only numeric literals are allowed")
     if isinstance(node, ast.BinOp) and type(node.op) in _BIN_OPS:
-        return _BIN_OPS[type(node.op)](_eval_node(node.left), _eval_node(node.right))
+        left = _eval_node(node.left)
+        right = _eval_node(node.right)
+        if isinstance(node.op, ast.Pow) and abs(right) > _MAX_POW_EXPONENT and abs(left) > 1:
+            raise ValueError(f"exponent too large (max {_MAX_POW_EXPONENT})")
+        return _check_size(_BIN_OPS[type(node.op)](left, right))
     if isinstance(node, ast.UnaryOp) and type(node.op) in _UNARY_OPS:
         return _UNARY_OPS[type(node.op)](_eval_node(node.operand))
     if isinstance(node, ast.Name):
@@ -159,7 +184,13 @@ def _eval_node(node: ast.AST) -> Any:
             raise ValueError("only whitelisted math functions may be called")
         if node.keywords:
             raise ValueError("keyword arguments are not supported")
-        return _ALLOWED_FUNCS[node.func.id](*[_eval_node(a) for a in node.args])
+        args = [_eval_node(a) for a in node.args]
+        limit = _INT_ARG_LIMITS.get(node.func.id)
+        if limit is not None and any(
+            isinstance(a, (int, float)) and abs(a) > limit for a in args
+        ):
+            raise ValueError(f"argument too large for {node.func.id}() (max {limit})")
+        return _check_size(_ALLOWED_FUNCS[node.func.id](*args))
     raise ValueError(f"unsupported expression element: {type(node).__name__}")
 
 
@@ -173,8 +204,12 @@ def _tool_calculate(expression: str) -> str:
     rejected, so this cannot be used to reach arbitrary Python objects.
     """
     try:
+        if len(expression) > _MAX_EXPR_CHARS:
+            return f"ERROR: expression too long (max {_MAX_EXPR_CHARS} characters)"
         tree = ast.parse(expression, mode="eval")
-        return str(_eval_node(tree))
+        if sum(1 for _ in ast.walk(tree)) > _MAX_AST_NODES:
+            return f"ERROR: expression too complex (max {_MAX_AST_NODES} AST nodes)"
+        return _truncate(str(_eval_node(tree)))
     except Exception as exc:  # noqa: BLE001
         return f"ERROR: {exc}"
 
@@ -185,7 +220,7 @@ def _tool_read_file(path: str) -> str:
         with open(path, "r", encoding="utf-8", errors="replace") as fh:
             data = fh.read(_MAX_READ_BYTES + 1)
         if len(data) > _MAX_READ_BYTES:
-            return _truncate(data[:_MAX_READ_BYTES], _MAX_READ_BYTES)
+            return _truncate(data, _MAX_READ_BYTES)
         return data
     except OSError as exc:
         return f"ERROR: {exc}"

@@ -81,3 +81,51 @@ class TestOpenAITranslation:
         msgs = _to_openai_messages(_history())
         assert msgs[0] == {"role": "system", "content": "You are Mythos."}
         assert msgs[1] == {"role": "user", "content": "Goal: compute 2**10"}
+
+
+class TestFallbackToolCallIds:
+    """When neutral history lacks tool_call_id, synthesized ids must still
+    link the assistant tool call to its tool result (Qodo PR #2 finding)."""
+
+    def _history_without_ids(self):
+        return [
+            {"role": "user", "content": "Goal: compute 2**10"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_name": "calculate",
+                "tool_args": {"expression": "2 ** 10"},
+            },
+            {"role": "tool", "content": "1024", "name": "calculate"},
+        ]
+
+    def test_openai_fallback_ids_match(self):
+        wire = _to_openai_messages(self._history_without_ids())
+        call_id = wire[1]["tool_calls"][0]["id"]
+        assert wire[2]["tool_call_id"] == call_id
+
+    def test_anthropic_fallback_ids_match(self):
+        _, conv = _to_anthropic_messages(self._history_without_ids())
+        tool_use = next(
+            b for b in conv[1]["content"] if b["type"] == "tool_use"
+        )
+        tool_result = conv[2]["content"][0]
+        assert tool_result["type"] == "tool_result"
+        assert tool_result["tool_use_id"] == tool_use["id"]
+
+    def test_openai_orphan_tool_result_dropped(self):
+        wire = _to_openai_messages([{"role": "tool", "content": "orphan"}])
+        assert wire == []
+
+    def test_anthropic_orphan_tool_result_dropped(self):
+        _, conv = _to_anthropic_messages([{"role": "tool", "content": "orphan"}])
+        assert conv == []
+
+    def test_two_sequential_calls_get_distinct_ids(self):
+        history = self._history_without_ids() + self._history_without_ids()[1:]
+        wire = _to_openai_messages(history)
+        first_id = wire[1]["tool_calls"][0]["id"]
+        second_id = wire[3]["tool_calls"][0]["id"]
+        assert first_id != second_id
+        assert wire[2]["tool_call_id"] == first_id
+        assert wire[4]["tool_call_id"] == second_id

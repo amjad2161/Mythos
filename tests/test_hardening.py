@@ -3,8 +3,17 @@ tests/test_hardening.py
 -----------------------
 Tests for the security / robustness hardening of the tools and memory layers.
 """
+import sys
+
 from mythos.memory import Message, ShortTermMemory
-from mythos.tools import _tool_calculate, _tool_run_shell, build_default_registry
+from mythos.tools import (
+    _MAX_TOOL_OUTPUT_CHARS,
+    _tool_calculate,
+    _tool_read_file,
+    _tool_run_shell,
+    _truncate,
+    build_default_registry,
+)
 
 
 class TestCalculatorSandbox:
@@ -35,13 +44,50 @@ class TestShellHardening:
         assert "exit code 3" in result
 
     def test_output_is_capped(self):
-        result = _tool_run_shell("python3 -c \"print('x' * 100000)\"")
+        # sys.executable (not "python3") so the test also runs on Windows.
+        result = _tool_run_shell(f'"{sys.executable}" -c "print(\'x\' * 100000)"')
         assert "truncated" in result
-        assert len(result) < 30_000
+        assert len(result) <= _MAX_TOOL_OUTPUT_CHARS
 
     def test_invalid_timeout_is_coerced(self):
         # Must not raise on a bad timeout value.
         assert _tool_run_shell("echo ok", timeout="not-an-int").strip() == "ok"
+
+
+class TestCalculatorResourceLimits:
+    def test_huge_exponent_rejected(self):
+        assert _tool_calculate("9**9**9").startswith("ERROR:")
+
+    def test_huge_intermediate_rejected(self):
+        assert _tool_calculate("(2**512)**512").startswith("ERROR:")
+
+    def test_factorial_argument_capped(self):
+        assert _tool_calculate("factorial(100000000)").startswith("ERROR:")
+
+    def test_expression_node_count_capped(self):
+        assert _tool_calculate("+".join(["1"] * 500)).startswith("ERROR:")
+
+    def test_expression_length_capped(self):
+        assert _tool_calculate("1" * 20_000).startswith("ERROR:")
+
+    def test_normal_math_still_works(self):
+        assert _tool_calculate("2 ** 10") == "1024"
+        assert _tool_calculate("factorial(10)") == "3628800"
+        assert _tool_calculate("(-1) ** 10**9") == "1"  # |base| <= 1 stays legal
+
+
+class TestOutputCaps:
+    def test_truncate_never_exceeds_limit(self):
+        out = _truncate("x" * 50_000, 1_000)
+        assert len(out) <= 1_000
+        assert "truncated" in out
+
+    def test_read_file_capped(self, tmp_path):
+        big = tmp_path / "big.txt"
+        big.write_text("x" * 300_000, encoding="utf-8")
+        out = _tool_read_file(str(big))
+        assert len(out) <= _MAX_TOOL_OUTPUT_CHARS
+        assert "truncated" in out
 
 
 class TestRegistryArgGuard:

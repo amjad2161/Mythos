@@ -280,16 +280,30 @@ def _safe_json_args(raw: Any) -> Dict[str, Any]:
 
 
 def _to_openai_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Translate neutral history into OpenAI Chat Completions wire messages."""
+    """
+    Translate neutral history into OpenAI Chat Completions wire messages.
+
+    When ``tool_call_id`` is missing from neutral history, the id synthesized
+    for an assistant tool call is remembered and reused for the following tool
+    result, so the two halves stay linked.  A tool result with no id and no
+    preceding tool call cannot be made wire-valid and is dropped.
+    """
     out: List[Dict[str, Any]] = []
+    fallback_counter = 0
+    last_tool_call_id: Optional[str] = None
     for m in messages:
         role = m.get("role")
         if role == "assistant" and m.get("tool_name") is not None:
+            call_id = m.get("tool_call_id")
+            if not call_id:
+                call_id = f"call_fb_{fallback_counter}"
+                fallback_counter += 1
+            last_tool_call_id = call_id
             out.append({
                 "role": "assistant",
                 "content": m.get("content") or None,
                 "tool_calls": [{
-                    "id": m.get("tool_call_id") or f"call_{len(out)}",
+                    "id": call_id,
                     "type": "function",
                     "function": {
                         "name": m["tool_name"],
@@ -298,9 +312,12 @@ def _to_openai_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 }],
             })
         elif role == "tool":
+            result_id = m.get("tool_call_id") or last_tool_call_id
+            if not result_id:
+                continue  # orphan tool result: no call to link it to
             out.append({
                 "role": "tool",
-                "tool_call_id": m.get("tool_call_id") or f"call_{len(out)}",
+                "tool_call_id": result_id,
                 "content": m.get("content", ""),
             })
         else:
@@ -319,27 +336,40 @@ def _to_anthropic_messages(messages: List[Dict[str, Any]]):
     """
     system_parts: List[str] = []
     conv: List[Dict[str, Any]] = []
+    fallback_counter = 0
+    last_tool_call_id: Optional[str] = None
 
     for m in messages:
         role = m.get("role")
         if role == "system":
             system_parts.append(m.get("content", ""))
         elif role == "tool":
+            # A synthesized id must match the one used for the originating
+            # tool_use block; an orphan result with no known call is dropped
+            # rather than emitted with an unlinkable id.
+            result_id = m.get("tool_call_id") or last_tool_call_id
+            if not result_id:
+                continue
             conv.append({
                 "role": "user",
                 "content": [{
                     "type": "tool_result",
-                    "tool_use_id": m.get("tool_call_id") or f"call_{len(conv)}",
+                    "tool_use_id": result_id,
                     "content": m.get("content", ""),
                 }],
             })
         elif role == "assistant" and m.get("tool_name") is not None:
+            call_id = m.get("tool_call_id")
+            if not call_id:
+                call_id = f"call_fb_{fallback_counter}"
+                fallback_counter += 1
+            last_tool_call_id = call_id
             blocks: List[Dict[str, Any]] = []
             if m.get("content"):
                 blocks.append({"type": "text", "text": m["content"]})
             blocks.append({
                 "type": "tool_use",
-                "id": m.get("tool_call_id") or f"call_{len(conv)}",
+                "id": call_id,
                 "name": m["tool_name"],
                 "input": m.get("tool_args") or {},
             })
