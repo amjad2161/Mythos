@@ -91,9 +91,14 @@ class Monitor:
         self._iteration += 1
         self._log("iteration", f"#{self._iteration}")
 
-    def record_tool_call(self, tool_name: str, success: bool, detail: str = "") -> None:
+    def record_tool_call(
+        self, tool_name: str, success: bool, detail: str = "", signature: Optional[str] = None
+    ) -> None:
         self._total_tool_calls += 1
-        self._recent_tool_calls.append(tool_name)
+        # Loop detection keys on the full call signature (name + arguments) so
+        # legitimately repeating a tool with *different* arguments — e.g.
+        # writing several files — is not mistaken for an infinite loop.
+        self._recent_tool_calls.append(signature or tool_name)
         if success:
             self._consecutive_failures = 0
             self._log("tool_call", f"{tool_name} → OK  {detail}")
@@ -106,7 +111,10 @@ class Monitor:
         self._log("error", f"LLM error: {detail}")
 
     def record_reflection(self, detail: str = "") -> None:
-        self._consecutive_failures = 0   # reflection resets the failure counter
+        # NB: reflection is a checkpoint, not a recovery guarantee.  It does not
+        # reset the failure counter — otherwise a failure streak that happens to
+        # span a reflection interval could loop forever without ever tripping
+        # the consecutive-failure alert.
         self._log("reflection", detail)
 
     def record_goal_complete(self, conclusion: str = "") -> None:
@@ -146,6 +154,14 @@ class Monitor:
 
     def reset_failures(self) -> None:
         self._consecutive_failures = 0
+
+    def reset(self) -> None:
+        """Clear all counters and history so the monitor can drive a fresh run."""
+        self._iteration = 0
+        self._consecutive_failures = 0
+        self._total_tool_calls = 0
+        self._events.clear()
+        self._recent_tool_calls.clear()
 
     # ------------------------------------------------------------------
     # Event log access

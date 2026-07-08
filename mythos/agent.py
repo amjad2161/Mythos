@@ -53,7 +53,7 @@ _SYSTEM_PROMPT = textwrap.dedent("""\
     OPERATING PRINCIPLES
     --------------------
     1. Understand the goal completely before acting.
-    2. Decompose complex goals into smaller sub-tasks when helpful.
+    2. Break complex goals down in your reasoning and tackle them step by step.
     3. Use tools purposefully – prefer the most specific tool for the job.
     4. After each tool result, reason about what to do next.
     5. When a goal is fully achieved, call the `finish` tool immediately
@@ -153,12 +153,16 @@ class MythosAgent:
             print(f"  Goal: {goal}")
             print(f"{'='*60}\n")
 
+        # Reset per-run state so a reused agent starts each goal cleanly
+        # (fresh iteration/failure counters, no leftover system prompt).
+        self._monitor.reset()
+
         # Create initial plan
         plan = self._planner.new_plan(goal)
 
         # Build and inject system prompt
         system_prompt = self._build_system_prompt(plan)
-        self._memory.clear_short_term()
+        self._memory.reset_short_term()
         self._memory.add_message("system", system_prompt)
         self._memory.add_message("user", f"Goal: {goal}")
 
@@ -169,6 +173,20 @@ class MythosAgent:
             if task is None:
                 if plan.has_failures():
                     conclusion = "Some tasks failed. " + self._collect_results(plan)
+                elif not plan.is_complete():
+                    # Remaining tasks exist but none is runnable (unsatisfied
+                    # dependencies) – report the deadlock instead of silently
+                    # claiming success.
+                    stuck = [
+                        f"[{t.id}] {t.description}"
+                        for t in plan.all_tasks()
+                        if t.status == TaskStatus.PENDING
+                    ]
+                    conclusion = (
+                        "Agent halted: "
+                        f"{len(stuck)} task(s) could not be started due to "
+                        f"unsatisfied dependencies: " + "; ".join(stuck)
+                    )
                 break
 
             if self.config.verbose:

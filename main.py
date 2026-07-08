@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import textwrap
 
 from mythos import MythosAgent, MythosConfig
 
@@ -88,7 +89,12 @@ def parse_args() -> argparse.Namespace:
         help="Print the Mythos version and exit.",
     )
 
-    return parser.parse_args()
+    args = parser.parse_args()
+
+    if args.max_iterations is not None and args.max_iterations < 1:
+        parser.error("--max-iterations must be a positive integer")
+
+    return args
 
 
 def build_config(args: argparse.Namespace) -> MythosConfig:
@@ -131,8 +137,6 @@ def interactive_mode(agent: MythosAgent) -> None:
 
 
 def main() -> int:
-    import textwrap  # noqa: PLC0415 – delayed to avoid polluting module top-level
-
     args = parse_args()
 
     if args.version:
@@ -145,7 +149,10 @@ def main() -> int:
 
     if args.goal:
         conclusion = agent.run(args.goal)
-        if args.quiet:
+        # In verbose mode the agent already prints the conclusion in its banner;
+        # otherwise (quiet or MYTHOS_VERBOSE=false) print it here so the CLI is
+        # never silent about its result.
+        if not config.verbose:
             print(conclusion)
         return 0
 
@@ -155,5 +162,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    import textwrap
     sys.exit(main())
