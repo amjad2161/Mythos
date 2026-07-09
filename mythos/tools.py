@@ -328,6 +328,16 @@ def _tool_memory_list() -> str:
     return "(memory_list is not wired yet)"
 
 
+def _tool_think(thought: str) -> str:
+    """
+    A private scratchpad: record structured reasoning before acting.
+
+    The tool has no side effects – its value is giving the model an explicit
+    place to plan/reflect that is preserved in the conversation history.
+    """
+    return "Thought logged."
+
+
 def _tool_finish(conclusion: str) -> str:
     """
     Mark the current goal as complete and return the final answer/conclusion.
@@ -464,6 +474,19 @@ def build_default_registry() -> ToolRegistry:
     ))
 
     registry.register(Tool(
+        name="think",
+        description=(
+            "Think out loud: record a structured thought (plan, hypothesis, "
+            "reflection) before acting. Has no side effects."
+        ),
+        parameters={
+            "thought": {"type": "string", "description": "The thought to record."}
+        },
+        func=_tool_think,
+        required=["thought"],
+    ))
+
+    registry.register(Tool(
         name="finish",
         description=(
             "Signal that the current goal has been fully achieved. "
@@ -479,5 +502,14 @@ def build_default_registry() -> ToolRegistry:
         func=_tool_finish,
         required=["conclusion"],
     ))
+
+    # Extended tool sets (web/geo/tts) live in sibling modules; imported
+    # lazily here to keep module import order acyclic.
+    from .tools_geo import GEO_TOOLS  # noqa: PLC0415
+    from .tools_tts import TTS_TOOLS  # noqa: PLC0415
+    from .tools_web import WEB_TOOLS  # noqa: PLC0415
+
+    for tool in (*WEB_TOOLS, *GEO_TOOLS, *TTS_TOOLS):
+        registry.register(tool)
 
     return registry

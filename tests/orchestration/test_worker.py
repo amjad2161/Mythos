@@ -204,13 +204,18 @@ class TestWorkerHandle:
         assert update.status == UpdateStatus.SUCCESS.value
         assert update.metrics.get("deadline_exceeded") is True
 
-    def test_iteration_cap_derived_from_token_budget(self):
-        worker = make_worker([], agent_config=make_agent_config(
-            llm_max_tokens=1000, max_iterations=50
+    def test_token_budget_flows_into_agent_config(self):
+        class HungryStub(StubLLM):
+            def chat(self, messages, tools=None, temperature=0.2, max_tokens=4096):
+                return LLMResponse(content="working...", usage={"input": 900, "output": 200})
+
+        worker = make_worker([])
+        worker._llm_factory = HungryStub
+        update = worker.handle(make_payload(
+            constraints=Constraints(max_compute_tokens=2000)
         ))
-        assert worker._derive_iteration_cap(5000) == 5
-        assert worker._derive_iteration_cap(10) == 1          # floor of 1
-        assert worker._derive_iteration_cap(10 ** 9) == 50    # capped by config
+        assert update.status == UpdateStatus.FAILURE.value
+        assert "Token budget exhausted" in update.error_log
 
 
 class TestWorkerOnBus:

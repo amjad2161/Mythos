@@ -78,8 +78,36 @@ CODE_DELIVERY = Workflow(
     ],
 )
 
+# Domain workflow: plan a route, then narrate it as audio.
+ROUTE_PLAN = Workflow(
+    name="route_plan",
+    steps=[
+        WorkflowStep(
+            role="navigator",
+            objective_template=(
+                "Plan the route(s) required by this request and write a "
+                "route summary (distance, duration, key turns) to "
+                "/tmp/mythos_route.txt: {goal}"
+            ),
+            success_criteria=(
+                "A route summary file exists with coordinates sourced from "
+                "the routing service."
+            ),
+        ),
+        WorkflowStep(
+            role="voice",
+            objective_template=(
+                "Read /tmp/mythos_route.txt and produce a short spoken-word "
+                "announcement of the route as /tmp/mythos_route.wav for: {goal}"
+            ),
+            success_criteria="An audio file announcing the route exists.",
+        ),
+    ],
+)
+
 BUILTIN_WORKFLOWS: Dict[str, Workflow] = {
     CODE_DELIVERY.name: CODE_DELIVERY,
+    ROUTE_PLAN.name: ROUTE_PLAN,
 }
 
 

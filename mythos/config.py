@@ -29,6 +29,11 @@ class MythosConfig:
     max_iterations: int = 50             # hard cap on autonomous iterations
     max_consecutive_failures: int = 5    # trigger self-recovery after N failures
     reflection_interval: int = 5        # reflect every N iterations
+    max_total_tokens: int = 0            # cumulative token budget (0 = unlimited)
+    max_wall_seconds: float = 0.0        # per-run wall-clock deadline (0 = unlimited)
+
+    # Extra text appended to the system prompt (e.g. a swarm persona block).
+    system_suffix: str = ""
 
     # Memory settings
     memory_window: int = 20              # how many recent messages to keep in context
@@ -50,6 +55,8 @@ class MythosConfig:
             max_iterations=int(os.getenv("MYTHOS_MAX_ITERATIONS", "50")),
             max_consecutive_failures=int(os.getenv("MYTHOS_MAX_FAILURES", "5")),
             reflection_interval=int(os.getenv("MYTHOS_REFLECTION_INTERVAL", "5")),
+            max_total_tokens=int(os.getenv("MYTHOS_MAX_TOTAL_TOKENS", "0")),
+            max_wall_seconds=float(os.getenv("MYTHOS_MAX_WALL_SECONDS", "0")),
             memory_window=int(os.getenv("MYTHOS_MEMORY_WINDOW", "20")),
             persist_memory=os.getenv("MYTHOS_PERSIST_MEMORY", "false").lower() == "true",
             memory_path=os.getenv("MYTHOS_MEMORY_PATH", "mythos_memory.json"),

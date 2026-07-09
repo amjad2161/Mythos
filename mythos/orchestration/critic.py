@@ -36,6 +36,7 @@ from ..tools import Tool, run_shell_command
 from .bus import CRITIC_QUEUE, RESULTS_QUEUE, MessageBus, task_queue
 from .config import OrchestrationConfig
 from .matrix import DataMatrix
+from .personas import Persona
 from .roles import build_registry_for_role
 from .schemas import (
     StateUpdate,
@@ -81,11 +82,17 @@ class CriticAgent:
         config: OrchestrationConfig,
         agent_config: Optional[MythosConfig] = None,
         llm_factory: Optional[Callable[[], BaseLLM]] = None,
+        persona: Optional["Persona"] = None,
     ) -> None:
         self._bus = bus
         self._matrix = matrix
         self._config = config
         self._agent_config = agent_config or MythosConfig.from_env()
+        if persona is not None:
+            self._agent_config = dataclasses.replace(
+                self._agent_config,
+                system_suffix=persona.compile_system_suffix(),
+            )
         self._llm_factory = llm_factory
         # Production path: one SDK client reused across judgment runs (client
         # construction + connection pooling is not free).  Test path: the

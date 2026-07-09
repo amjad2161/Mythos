@@ -29,6 +29,7 @@ ROLE_TOOLS: Dict[str, List[str]] = {
         "run_shell",
         "calculate",
         "current_time",
+        "think",
         "finish",
     ],
     "critic": [
@@ -36,6 +37,40 @@ ROLE_TOOLS: Dict[str, List[str]] = {
         "list_directory",
         "run_shell",
         "current_time",
+        "think",
+        "finish",
+    ],
+    # Web research: fetch + files, deliberately NO shell access.
+    "researcher": [
+        "web_fetch",
+        "read_file",
+        "write_file",
+        "list_directory",
+        "current_time",
+        "think",
+        "finish",
+    ],
+    # Geographic intelligence over the openrouteservice API.
+    "navigator": [
+        "ors_geocode",
+        "ors_directions",
+        "ors_isochrones",
+        "ors_matrix",
+        "calculate",
+        "read_file",
+        "write_file",
+        "current_time",
+        "think",
+        "finish",
+    ],
+    # Text-to-speech artifacts via the TTS sidecar.
+    "voice": [
+        "speak",
+        "read_file",
+        "write_file",
+        "list_directory",
+        "current_time",
+        "think",
         "finish",
     ],
 }

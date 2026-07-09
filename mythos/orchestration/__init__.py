@@ -43,14 +43,28 @@ __all__ = [
     "TaskPayload",
     "UpdateStatus",
     "SwarmRuntime",
+    "Persona",
+    "TaskLedger",
+    "CostGovernor",
+    "DynamicDecomposer",
 ]
+
+# Heavier members pull in the agent stack / optional deps; kept lazy so that
+# `import mythos.orchestration` stays cheap for schema-only consumers.
+_LAZY = {
+    "SwarmRuntime": ("runtime", "SwarmRuntime"),
+    "Persona": ("personas", "Persona"),
+    "TaskLedger": ("ledger", "TaskLedger"),
+    "CostGovernor": ("governor", "CostGovernor"),
+    "DynamicDecomposer": ("decomposer", "DynamicDecomposer"),
+}
 
 
 def __getattr__(name):  # noqa: ANN001, ANN202
-    # SwarmRuntime pulls in the whole agent stack; keep it lazy so that
-    # `import mythos.orchestration` stays cheap for schema-only consumers.
-    if name == "SwarmRuntime":
-        from .runtime import SwarmRuntime  # noqa: PLC0415
+    target = _LAZY.get(name)
+    if target is not None:
+        import importlib  # noqa: PLC0415
 
-        return SwarmRuntime
+        module = importlib.import_module(f".{target[0]}", __name__)
+        return getattr(module, target[1])
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -120,6 +120,8 @@ class MythosAgent:
             max_iterations=self.config.max_iterations,
             max_consecutive_failures=self.config.max_consecutive_failures,
             reflection_interval=self.config.reflection_interval,
+            max_total_tokens=self.config.max_total_tokens,
+            max_wall_seconds=self.config.max_wall_seconds,
         )
 
         # Tool registry – allow injection for testing
@@ -253,10 +255,13 @@ class MythosAgent:
 
     def _build_system_prompt(self, plan: Plan) -> str:
         tool_names = ", ".join(self._registry.names())
-        return _SYSTEM_PROMPT.format(
+        prompt = _SYSTEM_PROMPT.format(
             tool_list=tool_names,
             plan_summary=plan.summary(),
         )
+        if self.config.system_suffix:
+            prompt = f"{prompt}\n{self.config.system_suffix}"
+        return prompt
 
     def _refresh_system_prompt(self, plan: Plan) -> None:
         """Replace the system message with an updated plan summary."""

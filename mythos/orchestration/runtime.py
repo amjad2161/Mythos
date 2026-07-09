@@ -18,6 +18,8 @@ from ..llm import BaseLLM
 from .bus import InMemoryBus, MessageBus, RabbitMQBus
 from .config import OrchestrationConfig
 from .critic import CriticAgent
+from .decomposer import DynamicDecomposer, create_decomposer_llm
+from .governor import CostGovernor
 from .matrix import (
     DataMatrix,
     HashEmbedder,
@@ -26,6 +28,8 @@ from .matrix import (
     create_embedder,
 )
 from .orchestrator import Orchestrator
+from .personas import builtin_personas
+from .roles import known_roles
 from .worker import WorkerAgent
 from .workflows import Workflow, get_workflow
 
@@ -73,15 +77,26 @@ class SwarmRuntime:
         bus: Optional[MessageBus] = None,
         matrix: Optional[DataMatrix] = None,
         llm_factories: Optional[Dict[str, Callable[[], BaseLLM]]] = None,
+        decomposer_llm_factory: Optional[Callable[[], BaseLLM]] = None,
     ) -> None:
         self.config = config or OrchestrationConfig.from_env()
         self.agent_config = agent_config or MythosConfig.from_env()
-        self.workflow = workflow or get_workflow("code_delivery")
+        self.workflow = workflow or get_workflow(self.config.fallback_workflow)
         self.bus = bus or create_bus(self.config)
         self.matrix = matrix or create_matrix(self.config)
         factories = llm_factories or {}
+        personas = builtin_personas(self.config.persona_dir)
+        self.governor = CostGovernor(
+            hourly_token_budget=self.config.hourly_token_budget,
+            run_token_budget=self.config.run_token_budget,
+        )
 
-        roles = {step.role for step in self.workflow.steps}
+        # Dynamic mode can route to any known role, so every role gets a
+        # worker; rigid mode only needs the workflow's roles.
+        if self.config.dynamic:
+            roles = {role for role in known_roles() if role != "critic"}
+        else:
+            roles = {step.role for step in self.workflow.steps}
         self.workers = [
             WorkerAgent(
                 role=role,
@@ -90,6 +105,8 @@ class SwarmRuntime:
                 config=self.config,
                 agent_config=self.agent_config,
                 llm_factory=factories.get(role),
+                persona=personas.get(role),
+                governor=self.governor,
             )
             for role in sorted(roles)
         ]
@@ -99,12 +116,23 @@ class SwarmRuntime:
             config=self.config,
             agent_config=self.agent_config,
             llm_factory=factories.get("critic"),
+            persona=personas.get("critic"),
         )
+
+        decomposer = None
+        if self.config.dynamic:
+            decomposer_llm = (
+                decomposer_llm_factory()
+                if decomposer_llm_factory
+                else create_decomposer_llm(self.config, self.agent_config)
+            )
+            decomposer = DynamicDecomposer(decomposer_llm, self.config)
         self.orchestrator = Orchestrator(
             bus=self.bus,
             matrix=self.matrix,
             config=self.config,
             workflow=self.workflow,
+            decomposer=decomposer,
         )
         self._started = False
 
@@ -125,6 +153,7 @@ class SwarmRuntime:
     def run(self, goal: str) -> str:
         """Run one goal through the swarm (starting it if necessary)."""
         self.start()
+        self.governor.reset_run()
         return self.orchestrator.run(goal)
 
     def shutdown(self) -> None:

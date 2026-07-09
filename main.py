@@ -112,6 +112,14 @@ def parse_args() -> argparse.Namespace:
         default="code_delivery",
         help="Named rigid workflow to run for --swarm (default: code_delivery).",
     )
+    swarm_group.add_argument(
+        "--dynamic",
+        action="store_true",
+        help=(
+            "Decompose the goal dynamically with a routing LLM instead of a "
+            "rigid workflow (the named --workflow becomes the fallback)."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -177,6 +185,9 @@ def run_swarm(args: argparse.Namespace, config: MythosConfig) -> int:
         orch_config.bus_backend = args.bus
     if args.matrix is not None:
         orch_config.matrix_backend = args.matrix
+    if args.dynamic:
+        orch_config.dynamic = True
+        orch_config.fallback_workflow = args.workflow
     orch_config.verbose = config.verbose
 
     try:

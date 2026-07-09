@@ -225,43 +225,94 @@ Phase A runs all agents as threads in one process, but **every boundary is a
 real bus message** — splitting agents into separate processes or containers
 is a deployment change, not a code change.
 
-## 5. Roadmap
+## 5. Phase B — dynamic orchestration (IMPLEMENTED)
 
-### Phase A — deterministic automation (this PR)
-Rigid named workflows; sequential dispatch; structural critic loop; real
-RabbitMQ + Qdrant with in-memory drivers behind the same interfaces; full
-unit + integration test coverage.
+Phase B upgrades the deterministic Phase A swarm with adaptive routing,
+governance, and specialised domain agents.  Patterns were adopted from the
+owner's wider ecosystem (agency-agents runtime, Anthropic quickstarts).
 
-### Phase B — dynamic orchestration (designed, not implemented)
-* LLM-driven task decomposition in the orchestrator (replacing
-  `workflows.py` lookups with generated `Workflow` objects) and runtime
-  selection of agents/tools.
+### 5.1 Dynamic decomposition (`decomposer.py`)
+Two-stage routing replaces the rigid workflow when ``--dynamic`` is set:
+
+1. **Pre-filter** – deterministic keyword routing (`prefilter_roles`)
+   narrows the candidate roles; `backend_dev` is always a candidate.
+2. **LLM routing** – a cheap model (default `claude-haiku-4-5`) receives the
+   goal + candidate roles with their tool lists and must return ONLY strict
+   JSON `{"steps": [{role, objective, validation_command?,
+   success_criteria?}], "rationale"}`.  Parsing is `SchemaError`-strict; one
+   re-prompt carries the exact parse error verbatim; a second failure falls
+   back to the configured deterministic workflow.
+
+The output is an ordinary `Workflow` with `literal=True` steps (LLM text is
+never `.format()`ed), so dynamic decomposition drives the *identical*
+TaskPayload/queue pipeline — no new dispatch machinery.
+
+### 5.2 Personas (`personas.py`, `personas/*.md`)
+Each role carries a professional identity compiled from a Markdown persona
+(strict frontmatter: name/role/mission/rules/success_metrics — the
+agency-agents schema).  Personas append to the worker's system prompt via
+`MythosConfig.system_suffix`; `MYTHOS_PERSONA_DIR` overlays custom personas
+over the packaged five (backend_dev, critic, researcher, navigator, voice).
+
+### 5.3 Real resource governance
+* **Token accounting** — every provider response carries normalised
+  `LLMResponse.usage`; the `Monitor` accumulates it and enforces
+  `max_compute_tokens` as a REAL cumulative budget (plus a wall-clock
+  deadline from `timeout_ms`), stopping mid-run rather than post-hoc.
+* **Prompt caching** — the system prompt is sent as a `cache_control` block
+  (Anthropic), cutting repeat-prefix cost across loop iterations.
+* **Retries** — `RetryingLLM` wraps provider calls with exponential backoff
+  on transient errors (rate limits, overload, connection blips).
+* **CostGovernor** (`governor.py`) — sliding-hourly + per-run token budgets;
+  when tripped, workers refuse new tasks with a structured FAILURE.
+
+### 5.4 Task ledger (`ledger.py`)
+Externalized durable progress (the autonomous-coding feature-list pattern):
+one stable `MemoryNode` per goal records each step's role, objective,
+task_id, status (pending → dispatched → validated/failed), attempts, and
+summary.  Single-writer (orchestrator) by design — the matrix has no CAS.
+
+### 5.5 New tools and roles
+* `web_fetch` (`tools_web.py`) — SSRF-hardened: http/https only, every hop's
+  DNS answers must be public, metadata endpoints blocked, manual redirect
+  validation (≤5), 100 kB body cap.  Known stdlib limitation: DNS-rebinding
+  TOCTOU (validation resolves separately from the connection).
+* `think` — a no-side-effect reasoning scratchpad (quickstarts ThinkTool).
+* **researcher** — web_fetch + files, deliberately no shell.
+* **navigator** (`tools_geo.py`) — openrouteservice REST via stdlib urllib:
+  `ors_geocode`, `ors_directions`, `ors_isochrones`, `ors_matrix`
+  (`ORS_API_KEY`, or `MYTHOS_ORS_URL` for self-hosted).
+* **voice** (`tools_tts.py`) — `speak` posts to any OpenAI-compatible
+  `/v1/audio/speech` sidecar (reference: supertonic — MIT code, OpenRAIL-M
+  weights); `docker compose --profile voice up`.
+* `route_plan` builtin workflow: navigator → voice.
+
+## 6. Roadmap (remaining)
+
+### Phase B follow-ups
 * Concurrent dispatch of independent plan branches (`Plan.depends_on`
-  already models the DAG; `_wait_for` becomes a correlation map).
-* Controlled "hallucination" for brainstorming inside agents, with hard
-  guardrails at the boundary: strict schemas (already enforced), trust-score
-  contradiction detection in the matrix, zero tolerance for fabricated data
-  in execution paths.
+  already models the DAG; `_wait_for` already buffers out-of-order results).
+* Trust-score contradiction *detection* in the matrix (ordering is done).
 * HTTP webhook adapter for `callback_queue` → true `callback_webhook`.
-* Real token accounting from `LLMResponse.raw` usage (replacing the
-  iteration-cap approximation), `access_level` enforcement.
+* `access_level` enforcement; matrix-similarity pre-filter for the router.
 
 ### Phase C — always-on autonomy (designed, not implemented)
 * Agents as separate processes/containers (compose services), always-on
-  consumers; hard timeouts via process supervision.
+  consumers; hard kill-timeouts via process supervision.
 * Self-initiated goals: monitors detect failures/opportunities and enqueue
   TaskPayloads without a human prompt; the human approves/rejects at the
   macro level.
 * Matrix-driven learning: artifacts and failure reports accumulate into
-  retrievable experience.
+  retrievable experience; work orders correlated via matrix nodes instead of
+  riding on StateUpdates.
 
-## 6. Deliberate deviations from the vision (Phase A)
+## 7. Deliberate deviations from the vision
 
-| Vision | Phase A implementation | Why |
+| Vision | Implementation | Why |
 |---|---|---|
-| `callback_webhook` (HTTP) | `callback_queue` (AMQP reply-to) | No HTTP server in Phase A; identical semantics. Webhook adapter is Phase B. |
-| `max_compute_tokens` enforced as tokens | Iteration cap ≈ `budget // llm_max_tokens` | The existing Monitor counts iterations; true accounting needs provider usage extraction (Phase B). |
-| Hard `timeout_ms` | Cooperative deadline (checked around the run) | A blocking LLM call cannot be killed mid-flight from a sibling thread; hard kills need process-per-agent (Phase C). |
+| `callback_webhook` (HTTP) | `callback_queue` (AMQP reply-to) | No HTTP server yet; identical semantics. Webhook adapter is a follow-up. |
+| `max_compute_tokens` enforced as tokens | **Done (Phase B)**: real cumulative accounting via `LLMResponse.usage` + Monitor | — |
+| Hard `timeout_ms` | Cooperative mid-run deadline (Monitor checks between iterations) | A blocking LLM call cannot be killed mid-flight from a sibling thread; hard kills need process-per-agent (Phase C). |
 | Kafka/RabbitMQ | RabbitMQ | Per-message acks and named queues map 1:1 to roles; Kafka's replay/throughput strengths are Phase C concerns. |
-| Separate graph DB | Edges in Qdrant payloads | The vision's node schema embeds edges in the node; 1-hop traversal needs no Cypher. Revisit Neo4j in Phase B if queries grow. |
-| Trust "overrides conflicting info" | Trust-ordered fusion (system first, verbatim) | Semantic contradiction *detection* is an open Phase B problem. |
+| Separate graph DB | Edges in Qdrant payloads | The vision's node schema embeds edges in the node; 1-hop traversal needs no Cypher. Revisit Neo4j if graph queries grow. |
+| Trust "overrides conflicting info" | Trust-ordered fusion (system first, verbatim) + trace-scoped navigation | Semantic contradiction *detection* remains open. |

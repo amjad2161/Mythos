@@ -27,10 +27,13 @@ setup(
     license="MIT",
     url="https://github.com/amjad2161/Mythos",
     packages=find_packages(exclude=["tests*"]),
+    package_data={"mythos.orchestration": ["personas/*.md"]},
     py_modules=["main"],   # the `mythos` console script imports the top-level main module
     python_requires=">=3.9",
     install_requires=[
-        "anthropic>=0.20.0",
+        # >=0.34: first SDK generation with GA prompt caching (cache_control
+        # blocks in list-valued `system`).
+        "anthropic>=0.34",
     ],
     extras_require={
         "openai": ["openai>=1.0.0"],

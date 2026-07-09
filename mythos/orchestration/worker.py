@@ -27,11 +27,13 @@ from typing import Callable, List, Optional
 
 from ..agent import MythosAgent
 from ..config import MythosConfig
-from ..llm import BaseLLM, create_llm
+from ..llm import BaseLLM, RetryingLLM, create_llm
 from ..tools import _truncate
 from .bus import CRITIC_QUEUE, MessageBus, task_queue
 from .config import OrchestrationConfig
+from .governor import CostGovernor
 from .matrix import DataMatrix, fuse_context
+from .personas import Persona
 from .roles import build_registry_for_role
 from .schemas import (
     MemoryNode,
@@ -53,12 +55,16 @@ class WorkerAgent:
         config: OrchestrationConfig,
         agent_config: Optional[MythosConfig] = None,
         llm_factory: Optional[Callable[[], BaseLLM]] = None,
+        persona: Optional[Persona] = None,
+        governor: Optional[CostGovernor] = None,
     ) -> None:
         self.role = role
         self.queue = task_queue(role)
         self._bus = bus
         self._matrix = matrix
         self._config = config
+        self._persona = persona
+        self._governor = governor
         # Template config for the inner MythosAgent; per-task constraints are
         # applied on a copy (dataclasses.replace) for every payload.
         self._agent_config = agent_config or MythosConfig.from_env()
@@ -111,6 +117,21 @@ class WorkerAgent:
     def handle(self, payload: TaskPayload) -> StateUpdate:
         """Execute one TaskPayload and return the structured result."""
         started = time.monotonic()
+
+        # Cost governance: a tripped governor makes workers refuse NEW work
+        # (in-flight tasks are unaffected) so a runaway goal can't keep
+        # burning budget.
+        if self._governor is not None:
+            reason = self._governor.check()
+            if reason is not None:
+                return self._state_update(
+                    payload,
+                    status=UpdateStatus.FAILURE,
+                    summary="Refused: cost governor tripped.",
+                    error_log=reason,
+                    wall_ms=0,
+                )
+
         try:
             return self._execute(payload, started)
         except Exception:  # noqa: BLE001 – a crash must become a structured FAILURE
@@ -161,7 +182,16 @@ class WorkerAgent:
         registry = build_registry_for_role(self.role, constraints.forbidden_modules)
         agent_config = dataclasses.replace(
             self._agent_config,
-            max_iterations=self._derive_iteration_cap(constraints.max_compute_tokens),
+            # max_compute_tokens is enforced as a REAL cumulative token
+            # budget by the Monitor; the configured max_iterations stays as
+            # the independent runaway-loop bound.
+            max_total_tokens=constraints.max_compute_tokens,
+            max_wall_seconds=constraints.timeout_ms / 1000.0,
+            system_suffix=(
+                self._persona.compile_system_suffix()
+                if self._persona
+                else self._agent_config.system_suffix
+            ),
         )
         agent = MythosAgent(
             config=agent_config,
@@ -172,6 +202,9 @@ class WorkerAgent:
         conclusion = agent.run(prompt)
         wall_ms = _elapsed_ms(started)
         failed = not agent.last_run_ok
+        tokens = agent.monitor.token_usage
+        if self._governor is not None:
+            self._governor.record(agent.monitor.total_tokens)
 
         # 4. Persist the outcome as ground truth in the Data Matrix, linked
         #    back to the context it was produced from and tagged with the
@@ -200,31 +233,23 @@ class WorkerAgent:
             wall_ms=wall_ms,
             result_pointers=[artifact.node_id],
             deadline_exceeded=wall_ms > constraints.timeout_ms,
+            tokens=tokens,
         )
 
     def _task_llm(self) -> BaseLLM:
         if self._llm_factory is not None:
             return self._llm_factory()
         if self._shared_llm is None:
-            self._shared_llm = create_llm(
-                provider=self._agent_config.llm_provider,
-                model=self._agent_config.llm_model,
-                api_key=self._agent_config.llm_api_key,
+            self._shared_llm = RetryingLLM(
+                create_llm(
+                    provider=self._agent_config.llm_provider,
+                    model=self._agent_config.llm_model,
+                    api_key=self._agent_config.llm_api_key,
+                ),
+                attempts=self._config.llm_retry_attempts,
+                base_delay=self._config.llm_retry_base_s,
             )
         return self._shared_llm
-
-    def _derive_iteration_cap(self, max_compute_tokens: int) -> int:
-        """
-        Approximate the payload's token budget as an iteration cap.
-
-        The single-agent Monitor counts iterations, not tokens; one iteration
-        can consume at most ``llm_max_tokens`` output tokens, so the budget
-        divided by that is a safe upper bound (never above the configured
-        agent cap, never below 1).
-        """
-        per_iteration = max(1, self._agent_config.llm_max_tokens)
-        derived = max(1, max_compute_tokens // per_iteration)
-        return min(derived, self._agent_config.max_iterations)
 
     def _state_update(
         self,
@@ -235,10 +260,13 @@ class WorkerAgent:
         error_log: Optional[str] = None,
         result_pointers: Optional[List[str]] = None,
         deadline_exceeded: bool = False,
+        tokens: Optional[dict] = None,
     ) -> StateUpdate:
         metrics = {"wall_ms": wall_ms, "attempt": payload.attempt}
         if deadline_exceeded:
             metrics["deadline_exceeded"] = True
+        if tokens:
+            metrics["tokens"] = tokens
         return StateUpdate(
             trace_id=payload.trace_id,
             task_id=payload.task_id,

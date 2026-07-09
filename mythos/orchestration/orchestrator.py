@@ -19,11 +19,12 @@ import queue
 import threading
 import time
 import uuid
-from typing import Dict, List, Optional
+from typing import TYPE_CHECKING, Dict, List, Optional
 
 from ..planner import Plan, Task
 from .bus import CRITIC_QUEUE, RESULTS_QUEUE, MessageBus, task_queue
 from .config import OrchestrationConfig
+from .ledger import TaskLedger
 from .matrix import DataMatrix
 from .schemas import (
     Constraints,
@@ -40,6 +41,9 @@ from .schemas import (
     new_trace_id,
 )
 from .workflows import Workflow, WorkflowStep
+
+if TYPE_CHECKING:
+    from .decomposer import DynamicDecomposer
 
 _SYSTEM_INSTRUCTION_TEXT = (
     "Ground rules for all agents: work only toward the stated objective, "
@@ -61,11 +65,16 @@ class Orchestrator:
         matrix: DataMatrix,
         config: OrchestrationConfig,
         workflow: Workflow,
+        decomposer: Optional["DynamicDecomposer"] = None,
     ) -> None:
         self._bus = bus
         self._matrix = matrix
         self._config = config
         self._workflow = workflow
+        # Phase B seam: when set, the goal is decomposed dynamically and
+        # *workflow* serves only as the deterministic fallback.
+        self._decomposer = decomposer
+        self._ledger = TaskLedger(matrix)
         self._results: "queue.Queue[StateUpdate]" = queue.Queue()
         # Updates that arrived while we were waiting for a different task –
         # kept (not dropped) and checked before blocking on the queue.
@@ -147,21 +156,43 @@ class Orchestrator:
         goal_node.metadata["trace_id"] = trace_id
         self._matrix.upsert(goal_node)
 
+        # Decompose: dynamically when a decomposer is wired (Phase B),
+        # otherwise the rigid workflow.  Either way the result is a Workflow,
+        # so everything downstream is identical.
+        workflow = (
+            self._decomposer.decompose(goal) if self._decomposer else self._workflow
+        )
+
         # Declare each role's queue once up front (not per dispatch).
-        for role in {step.role for step in self._workflow.steps}:
+        for role in {step.role for step in workflow.steps}:
             self._bus.declare_queue(task_queue(role))
 
-        # Decompose: workflow -> Plan (each step depends on the previous).
+        # Workflow -> Plan (each step depends on the previous).
         plan = Plan(goal=goal)
         steps_by_plan_id: Dict[int, WorkflowStep] = {}
+        index_by_plan_id: Dict[int, int] = {}
         previous_id: Optional[int] = None
-        for step in self._workflow.steps:
+        for index, step in enumerate(workflow.steps):
             task = plan.add_task(
                 description=step.objective(goal),
                 depends_on=[previous_id] if previous_id is not None else [],
             )
             steps_by_plan_id[task.id] = step
+            index_by_plan_id[task.id] = index
             previous_id = task.id
+
+        # Durable, externalized progress: the ledger is the observable source
+        # of truth for this goal's subtask states.
+        ledger_id = self._ledger.create(
+            trace_id=trace_id,
+            goal=goal,
+            steps=[
+                {"role": step.role, "objective": step.objective(goal)}
+                for step in workflow.steps
+            ],
+            goal_node_id=goal_node.node_id,
+        )
+        self._log(f"[Orchestrator] Ledger node: {ledger_id}")
 
         # Dispatch loop: one ready subtask at a time (Phase A is strictly
         # sequential; concurrent dispatch is a Phase B concern).
@@ -178,17 +209,27 @@ class Orchestrator:
                 )
 
             step = steps_by_plan_id[task.id]
-            update = self._dispatch_and_wait(trace_id, goal, task, step, goal_node.node_id)
+            step_index = index_by_plan_id[task.id]
+            update = self._dispatch_and_wait(
+                trace_id, goal, task, step, goal_node.node_id, ledger_id, step_index
+            )
 
             if update.status == UpdateStatus.VALIDATED.value:
                 summary = self._resolve_result(update)
                 task.mark_done(summary)
                 results.append(summary)
+                self._ledger.mark_terminal(
+                    ledger_id, step_index, "validated", update.attempt, summary
+                )
             else:
                 task.mark_failed(update.error_log or update.summary)
                 results.append(
                     f"[{step.role}] FAILED: {update.summary}"
                     + (f"\n{update.error_log}" if update.error_log else "")
+                )
+                self._ledger.mark_terminal(
+                    ledger_id, step_index, "failed", update.attempt,
+                    update.error_log or update.summary,
                 )
 
         if plan.has_failures():
@@ -206,6 +247,8 @@ class Orchestrator:
         task: Task,
         step: WorkflowStep,
         goal_node_id: str,
+        ledger_id: str,
+        step_index: int,
     ) -> StateUpdate:
         payload = TaskPayload(
             system_instruction=SystemInstruction.EXECUTE_SUBTASK.value,
@@ -223,6 +266,7 @@ class Orchestrator:
             callback_queue=CRITIC_QUEUE,
         )
         self._log(f"[Orchestrator] Dispatching task {payload.task_id} -> {step.role}")
+        self._ledger.mark_dispatched(ledger_id, step_index, payload.task_id)
         self._bus.publish(task_queue(step.role), payload.to_json())
         return self._wait_for(payload.task_id, payload.constraints)
 

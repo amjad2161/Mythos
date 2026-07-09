@@ -32,5 +32,15 @@ services:
       timeout: 5s
       retries: 5
 
+  # Optional TTS sidecar for the voice agent role (OpenAI-compatible
+  # /v1/audio/speech). Started only with: docker compose --profile voice up
+  # (first start downloads the supertonic package and model weights).
+  supertonic:
+    image: python:3.12-slim
+    profiles: ["voice"]
+    command: sh -c "pip install --no-cache-dir supertonic && supertonic serve --host 0.0.0.0 --port 8000"
+    ports:
+      - "8000:8000"
+
 volumes:
   qdrant_data:

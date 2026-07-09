@@ -84,6 +84,29 @@ python main.py --swarm --provider stub --bus inmemory --matrix inmemory "demo"
 (In stub mode the critic cannot obtain a real verdict, so this demonstrates
 the fail-safe path: three autonomous retries, then a reported failure.)
 
+**Dynamic orchestration (Phase B)** — instead of a rigid workflow, a cheap
+routing model decomposes the goal into role-assigned steps (strict JSON,
+deterministic fallback on parse failure):
+
+```bash
+python main.py --swarm --dynamic "Plan a driving route from Haifa to Eilat and narrate it as audio"
+```
+
+Specialised roles and their services:
+
+| Role | Tools | Needs |
+|---|---|---|
+| `backend_dev` | files, shell, calculate | — |
+| `researcher` | SSRF-hardened `web_fetch` (no shell) | network egress |
+| `navigator` | `ors_geocode/directions/isochrones/matrix` | `ORS_API_KEY` ([free key](https://openrouteservice.org)) or self-hosted `MYTHOS_ORS_URL` |
+| `voice` | `speak` → OpenAI-compatible TTS sidecar | `MYTHOS_TTS_URL` (e.g. `docker compose --profile voice up` — supertonic: MIT code, OpenRAIL-M model weights) |
+
+Every role carries a Markdown **persona** (override with `MYTHOS_PERSONA_DIR`);
+token spend is metered for real (`LLMResponse.usage` → Monitor budgets +
+prompt caching) and governed by an hourly/run **cost circuit breaker**
+(`MYTHOS_HOURLY_TOKEN_BUDGET`, `MYTHOS_RUN_TOKEN_BUDGET`); each goal keeps a
+durable **task ledger** in the Data Matrix.
+
 Integration tests against live services:
 
 ```bash
