@@ -24,7 +24,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from ..config import MythosConfig
 from ..llm import BaseLLM, RetryingLLM, create_llm
@@ -63,11 +63,15 @@ sequential steps, each assigned to exactly one role.
 Respond with ONLY a JSON object - no markdown fences, no prose:
 {{"steps": [{{"role": "<role>", "objective": "<what that agent must do>",
 "validation_command": "<optional shell command, exit 0 = success, or empty>",
-"success_criteria": "<one sentence>"}}],
+"success_criteria": "<one sentence>",
+"depends_on": [<indices of prerequisite steps>]}}],
 "rationale": "<one sentence explaining the split>"}}
 
 Rules: use only the listed roles; keep objectives self-contained (each agent
-sees only its own objective plus shared memory); prefer fewer steps."""
+sees only its own objective plus shared memory); prefer fewer steps.
+depends_on lists earlier step indices (0-based); use [] for steps that are
+independent - independent steps run CONCURRENTLY, so parallelize when the
+goal allows it. Omit depends_on for a simple sequential chain."""
 
 _DECOMPOSER_USER = """\
 GOAL:
@@ -84,6 +88,8 @@ class DecomposedStep:
     objective: str
     validation_command: str = ""
     success_criteria: str = ""
+    # Prerequisite step indices; None = sequential (previous step).
+    depends_on: Optional[List[int]] = None
 
 
 def prefilter_roles(goal: str) -> List[str]:
@@ -127,11 +133,20 @@ def parse_decomposition(
             raise SchemaError(f"step {i} uses role {role!r}, allowed: {sorted(allowed_roles)}")
         if not isinstance(objective, str) or not objective.strip():
             raise SchemaError(f"step {i} has an empty objective")
+        depends_on = item.get("depends_on")
+        if depends_on is not None:
+            if not isinstance(depends_on, list) or not all(
+                isinstance(d, int) and 0 <= d < i for d in depends_on
+            ):
+                raise SchemaError(
+                    f"step {i} depends_on must list earlier step indices (0..{i - 1})"
+                )
         steps.append(DecomposedStep(
             role=role,
             objective=objective.strip(),
             validation_command=str(item.get("validation_command", "") or ""),
             success_criteria=str(item.get("success_criteria", "") or ""),
+            depends_on=depends_on,
         ))
     return steps, str(data.get("rationale", ""))
 
@@ -201,6 +216,7 @@ class DynamicDecomposer:
                         validation_command_template=s.validation_command,
                         success_criteria=s.success_criteria,
                         literal=True,  # LLM text is literal, never .format()ed
+                        depends_on=s.depends_on,
                     )
                     for s in steps
                 ],

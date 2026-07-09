@@ -290,8 +290,12 @@ summary.  Single-writer (orchestrator) by design — the matrix has no CAS.
 ## 6. Roadmap (remaining)
 
 ### Phase B follow-ups
-* Concurrent dispatch of independent plan branches (`Plan.depends_on`
-  already models the DAG; `_wait_for` already buffers out-of-order results).
+* **Concurrent dispatch — DONE.** Every ready DAG branch is dispatched
+  immediately and the orchestrator waits for whichever in-flight subtask
+  finishes first (`_wait_for_any`); `WorkflowStep.depends_on` /
+  the decomposer's `depends_on` express parallel branches (None = sequential
+  chain, [] = independent).  Parallelism is across roles (one worker thread
+  per role); N-workers-per-role is a deployment scaling knob for Phase C.
 * Trust-score contradiction *detection* in the matrix (ordering is done).
 * HTTP webhook adapter for `callback_queue` → true `callback_webhook`.
 * `access_level` enforcement; matrix-similarity pre-filter for the router.

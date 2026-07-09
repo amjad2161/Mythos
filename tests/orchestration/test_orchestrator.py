@@ -246,6 +246,113 @@ class TestOrchestratorRun:
         finally:
             orchestrator.stop()
 
+    def test_independent_steps_dispatch_concurrently(self):
+        """Two independent steps are BOTH dispatched before either result is
+        answered; a join step depending on both runs only afterwards."""
+        import time
+
+        bus = InMemoryBus()
+        matrix = InMemoryDataMatrix(HashEmbedder())
+        stop = threading.Event()
+        received = []          # payloads seen by the fake swarm
+        lock = threading.Lock()
+
+        def branches_seen():
+            with lock:
+                return sum(
+                    1 for p in received
+                    if p.task_parameters.objective.startswith("branch")
+                )
+
+        def responder(body):
+            payload = TaskPayload.from_json(body)
+            with lock:
+                received.append(payload)
+            if payload.task_parameters.objective.startswith("branch"):
+                # Answer the branch tasks only once BOTH were dispatched -
+                # proof the orchestrator did not wait for one before sending
+                # the other.
+                deadline = time.monotonic() + 5
+                while branches_seen() < 2:
+                    if time.monotonic() > deadline:
+                        raise AssertionError("second branch was never dispatched")
+                    time.sleep(0.01)
+            node = MemoryNode.create(
+                node_type="artifact",
+                content=f"done: {payload.task_parameters.objective}",
+                source="scripted",
+            )
+            matrix.upsert(node)
+            bus.publish(
+                RESULTS_QUEUE,
+                StateUpdate(
+                    trace_id=payload.trace_id,
+                    task_id=payload.task_id,
+                    agent_role="critic",
+                    status=UpdateStatus.VALIDATED.value,
+                    result_pointers=[node.node_id],
+                    summary=payload.task_parameters.objective,
+                ).to_json(),
+            )
+
+        # Two consumers on the role queue (= two workers of the same role),
+        # so the branch handlers can genuinely overlap.
+        listeners = [
+            threading.Thread(
+                target=bus.consume,
+                args=(task_queue("backend_dev"), responder, stop),
+                daemon=True,
+            )
+            for _ in range(2)
+        ]
+        for listener in listeners:
+            listener.start()
+
+        workflow = Workflow(
+            name="diamond",
+            steps=[
+                WorkflowStep(role="backend_dev", objective_template="branch A: {goal}",
+                             depends_on=[]),
+                WorkflowStep(role="backend_dev", objective_template="branch B: {goal}",
+                             depends_on=[]),
+                WorkflowStep(role="backend_dev", objective_template="join: {goal}",
+                             depends_on=[0, 1]),
+            ],
+        )
+        orchestrator = Orchestrator(bus, matrix, make_config(), workflow)
+        orchestrator.start()
+        try:
+            conclusion = orchestrator.run("the goal")
+        finally:
+            orchestrator.stop()
+            stop.set()
+            for listener in listeners:
+                listener.join(timeout=2)
+
+        assert "done: branch A: the goal" in conclusion
+        assert "done: branch B: the goal" in conclusion
+        assert "done: join: the goal" in conclusion
+        # The join must have been dispatched last, after both branches.
+        objectives = [p.task_parameters.objective for p in received]
+        assert objectives.index("join: the goal") == 2
+
+    def test_failed_branch_blocks_dependents(self):
+        workflow = Workflow(
+            name="fail_branch",
+            steps=[
+                WorkflowStep(role="backend_dev", objective_template="one: {goal}",
+                             depends_on=[]),
+                WorkflowStep(role="backend_dev", objective_template="two: {goal}",
+                             depends_on=[0]),
+            ],
+        )
+        conclusion, _, _ = run_goal(
+            workflow, [(UpdateStatus.FAILURE, "branch one broke")]
+        )
+        assert conclusion.startswith("Goal failed.")
+        assert "branch one broke" in conclusion
+        assert "two:" not in conclusion  # dependent never dispatched
+
     def test_unmatched_updates_are_buffered_not_dropped(self):
         import time
 

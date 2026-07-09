@@ -85,6 +85,31 @@ class TestParsing:
         with pytest.raises(SchemaError, match="no content"):
             parse_decomposition("", self.ALLOWED, max_steps=6)
 
+    def test_depends_on_parsed(self):
+        raw = decomposition_json([
+            {"role": "backend_dev", "objective": "a", "depends_on": []},
+            {"role": "backend_dev", "objective": "b", "depends_on": []},
+            {"role": "backend_dev", "objective": "join", "depends_on": [0, 1]},
+        ])
+        steps, _ = parse_decomposition(raw, self.ALLOWED, max_steps=6)
+        assert steps[0].depends_on == []
+        assert steps[2].depends_on == [0, 1]
+
+    def test_depends_on_forward_reference_rejected(self):
+        raw = decomposition_json([
+            {"role": "backend_dev", "objective": "a", "depends_on": [1]},
+            {"role": "backend_dev", "objective": "b"},
+        ])
+        with pytest.raises(SchemaError, match="depends_on"):
+            parse_decomposition(raw, self.ALLOWED, max_steps=6)
+
+    def test_depends_on_self_reference_rejected(self):
+        raw = decomposition_json([
+            {"role": "backend_dev", "objective": "a", "depends_on": [0]},
+        ])
+        with pytest.raises(SchemaError, match="depends_on"):
+            parse_decomposition(raw, self.ALLOWED, max_steps=6)
+
 
 class TestDynamicDecomposer:
     def test_valid_first_response_builds_literal_workflow(self):

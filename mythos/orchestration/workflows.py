@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import shlex
 from dataclasses import dataclass, field
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 
 @dataclass
@@ -37,6 +37,10 @@ class WorkflowStep:
     # True for LLM-generated steps: templates are literal text, not .format
     # templates (braces in generated objectives must not crash or substitute).
     literal: bool = False
+    # Indices of prerequisite steps within the workflow.  None = depends on
+    # the previous step (the sequential default); [] = independent (may run
+    # concurrently with other ready steps).
+    depends_on: Optional[List[int]] = None
 
     def objective(self, goal: str) -> str:
         if self.literal:
