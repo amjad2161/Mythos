@@ -80,21 +80,39 @@ def known_roles() -> List[str]:
     return sorted(ROLE_TOOLS.keys())
 
 
+# Access levels (TargetAgent.access_level) gate what a role's registry may
+# mutate, independent of the role itself:
+#   restricted – read/reason only: every state-mutating tool is stripped
+#   standard   – the role's full allow-list (default)
+#   elevated   – reserved for Phase C privileged flows; = standard for now
+ACCESS_LEVELS = ("restricted", "standard", "elevated")
+_MUTATING_TOOLS = frozenset({"run_shell", "write_file", "append_file", "speak"})
+
+
 def build_registry_for_role(
     role: str,
     forbidden_modules: Sequence[str] = (),
+    access_level: str = "standard",
 ) -> ToolRegistry:
     """
-    Build the Tools API for *role*, minus any per-task forbidden tools.
+    Build the Tools API for *role*, minus any per-task forbidden tools,
+    filtered by the payload's *access_level*.
 
-    Raises ``ValueError`` for an unknown role – a payload addressed to a role
-    nobody defined must fail loudly, not fall back to the full toolset.
+    Raises ``ValueError`` for an unknown role or access level – a payload
+    addressed to a role/level nobody defined must fail loudly, not fall back
+    to the full toolset.
     """
     allowed = ROLE_TOOLS.get(role)
     if allowed is None:
         raise ValueError(f"Unknown agent role: '{role}'. Known roles: {known_roles()}")
+    if access_level not in ACCESS_LEVELS:
+        raise ValueError(
+            f"Unknown access level: '{access_level}'. Known: {list(ACCESS_LEVELS)}"
+        )
 
     banned = set(forbidden_modules)
+    if access_level == "restricted":
+        banned |= _MUTATING_TOOLS
     if "finish" in banned:
         # Without `finish` the inner loop can only end via the iteration cap.
         banned.discard("finish")

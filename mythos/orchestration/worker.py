@@ -179,7 +179,11 @@ class WorkerAgent:
 
         # 3. Build the constrained inner agent: role Tools API minus
         #    forbidden modules, iteration cap derived from the token budget.
-        registry = build_registry_for_role(self.role, constraints.forbidden_modules)
+        registry = build_registry_for_role(
+            self.role,
+            constraints.forbidden_modules,
+            access_level=payload.target_agent.access_level,
+        )
         agent_config = dataclasses.replace(
             self._agent_config,
             # max_compute_tokens is enforced as a REAL cumulative token

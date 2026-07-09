@@ -58,6 +58,19 @@ Try it offline (no API key needed) with the deterministic stub backend:
 python main.py --provider stub "smoke test"
 ```
 
+## Engineering dossier
+
+The full delivery documentation set lives in [`docs/`](docs/):
+
+| Document | What it covers |
+|---|---|
+| [ARCHITECTURE.md](docs/ARCHITECTURE.md) | The three-layer design, M2M protocol, Data Matrix, roadmap |
+| [PRD.md](docs/PRD.md) | Problem, personas, user journeys, FR/NFR requirements, KPIs, release criteria |
+| [SECURITY.md](docs/SECURITY.md) | Trust boundaries, STRIDE threat model, permissions/access levels, hardening checklist |
+| [OPERATIONS.md](docs/OPERATIONS.md) | Topology, config reference, health checks, runbook procedures, scaling |
+| [QA.md](docs/QA.md) | Test architecture, coverage map, gap analysis, release quality gates |
+| [PERFORMANCE.md](docs/PERFORMANCE.md) | Measured benchmarks (`scripts/bench.py`), capacity envelope, limits |
+
 ## Run it on your PC (one command)
 
 ```bash

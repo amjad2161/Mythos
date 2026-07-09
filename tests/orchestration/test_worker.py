@@ -60,18 +60,52 @@ class TestRoles:
         with pytest.raises(ValueError):
             build_registry_for_role("astronaut")
 
-    def test_role_listing_unknown_tool_raises(self):
+    def test_restricted_access_level_strips_mutating_tools(self):
+        registry = build_registry_for_role("backend_dev", access_level="restricted")
+        for name in ("run_shell", "write_file", "append_file"):
+            assert registry.get(name) is None, name
+        assert registry.get("read_file") is not None
+        assert registry.get("finish") is not None
+
+    def test_elevated_access_level_equals_standard(self):
+        standard = build_registry_for_role("backend_dev", access_level="standard")
+        elevated = build_registry_for_role("backend_dev", access_level="elevated")
+        assert standard.names() == elevated.names()
+
+    def test_unknown_access_level_raises(self):
+        with pytest.raises(ValueError, match="access level"):
+            build_registry_for_role("backend_dev", access_level="root")
+
+    def test_worker_enforces_payload_access_level(self):
+        seen_tools = []
+
+        class RecordingStub(StubLLM):
+            def chat(self, messages, tools=None, temperature=0.2, max_tokens=4096):
+                seen_tools.append([t["function"]["name"] for t in (tools or [])])
+                return LLMResponse(content=None, tool_name="finish",
+                                   tool_args={"conclusion": "ok"})
+
+        worker = make_worker([])
+        worker._llm_factory = RecordingStub
+        from mythos.orchestration.schemas import TargetAgent
+        worker.handle(make_payload(
+            target_agent=TargetAgent(role="backend_dev", access_level="restricted")
+        ))
+        assert "run_shell" not in seen_tools[0]
+        assert "write_file" not in seen_tools[0]
+        assert "read_file" in seen_tools[0]
+
+    def test_role_listing_unknown_tool_raises(self, monkeypatch):
         # A typo in a role allow-list must fail at startup, not produce a
         # silently under-tooled worker.
         from mythos.orchestration import roles
 
-        original = roles.ROLE_TOOLS["backend_dev"]
-        roles.ROLE_TOOLS["backend_dev"] = original + ["no_such_tool"]
-        try:
-            with pytest.raises(ValueError, match="no_such_tool"):
-                build_registry_for_role("backend_dev")
-        finally:
-            roles.ROLE_TOOLS["backend_dev"] = original
+        monkeypatch.setitem(
+            roles.ROLE_TOOLS, "backend_dev",
+            roles.ROLE_TOOLS["backend_dev"] + ["no_such_tool"],
+        )
+        with pytest.raises(ValueError, match="no_such_tool"):
+            build_registry_for_role("backend_dev")
 
 
 class TestWorkerHandle:

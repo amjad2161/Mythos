@@ -10,4 +10,4 @@ from .agent import MythosAgent
 from .config import MythosConfig
 
 __all__ = ["MythosAgent", "MythosConfig"]
-__version__ = "0.1.0"
+__version__ = "0.2.0"
