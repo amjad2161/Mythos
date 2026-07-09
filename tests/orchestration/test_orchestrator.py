@@ -11,7 +11,6 @@ import threading
 import pytest
 
 from mythos.orchestration.bus import CRITIC_QUEUE, RESULTS_QUEUE, InMemoryBus, task_queue
-from mythos.orchestration.config import OrchestrationConfig
 from mythos.orchestration.matrix import HashEmbedder, InMemoryDataMatrix
 from mythos.orchestration.orchestrator import Orchestrator, SwarmTimeoutError
 from mythos.orchestration.schemas import MemoryNode, StateUpdate, TaskPayload, UpdateStatus
@@ -21,16 +20,11 @@ from mythos.orchestration.workflows import (
     get_workflow,
 )
 
+from .conftest import make_orch_config
 
-def make_config(**overrides) -> OrchestrationConfig:
-    defaults = dict(
-        bus_backend="inmemory",
-        matrix_backend="inmemory",
-        result_timeout_s=5.0,
-        verbose=False,
-    )
-    defaults.update(overrides)
-    return OrchestrationConfig(**defaults)
+
+def make_config(**overrides) -> "OrchestrationConfig":
+    return make_orch_config(result_timeout_s=overrides.pop("result_timeout_s", 5.0), **overrides)
 
 
 class ScriptedSwarm:
@@ -107,6 +101,27 @@ class TestWorkflows:
     def test_objective_substitutes_goal(self):
         step = WorkflowStep(role="backend_dev", objective_template="Implement: {goal}")
         assert step.objective("X") == "Implement: X"
+
+    def test_validation_command_shell_quotes_goal(self):
+        # The goal is user text substituted into a shell=True command - a
+        # crafted goal must not inject shell syntax.
+        step = WorkflowStep(
+            role="backend_dev",
+            objective_template="{goal}",
+            validation_command_template="grep -q {goal} /tmp/out",
+        )
+        command = step.validation_command("x'; rm -rf /tmp/pwned; echo '")
+        import shlex
+        # The quoted goal round-trips as ONE argv token - no injection.
+        assert shlex.split(command)[2] == "x'; rm -rf /tmp/pwned; echo '"
+
+    def test_literal_step_leaves_braces_intact(self):
+        step = WorkflowStep(
+            role="backend_dev",
+            objective_template="print({'a': 1}) then {goal}",
+            literal=True,
+        )
+        assert step.objective("X") == "print({'a': 1}) then {goal}"
 
 
 class TestOrchestratorRun:
@@ -230,3 +245,49 @@ class TestOrchestratorRun:
                 orchestrator.run("nobody is listening")
         finally:
             orchestrator.stop()
+
+    def test_unmatched_updates_are_buffered_not_dropped(self):
+        import time
+
+        bus = InMemoryBus()
+        matrix = InMemoryDataMatrix(HashEmbedder())
+        stop = threading.Event()
+
+        def answer_with_noise(body):
+            payload = TaskPayload.from_json(body)
+            # First an unrelated update (must be buffered, not dropped, and
+            # must not extend the absolute deadline), then the real one.
+            for task_id in ("some-other-task", payload.task_id):
+                bus.publish(
+                    RESULTS_QUEUE,
+                    StateUpdate(
+                        trace_id=payload.trace_id,
+                        task_id=task_id,
+                        agent_role="critic",
+                        status=UpdateStatus.VALIDATED.value,
+                        summary=f"result for {task_id}",
+                    ).to_json(),
+                )
+
+        listener = threading.Thread(
+            target=bus.consume,
+            args=(task_queue("backend_dev"), answer_with_noise, stop),
+            daemon=True,
+        )
+        listener.start()
+        orchestrator = Orchestrator(
+            bus, matrix, make_config(), get_workflow("code_delivery")
+        )
+        orchestrator.start()
+        try:
+            started = time.monotonic()
+            conclusion = orchestrator.run("the goal")
+            assert time.monotonic() - started < 5
+        finally:
+            orchestrator.stop()
+            stop.set()
+            listener.join(timeout=2)
+
+        assert "result for" in conclusion
+        # The unrelated update is retrievable, not lost.
+        assert "some-other-task" in orchestrator._unmatched

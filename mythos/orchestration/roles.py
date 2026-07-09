@@ -70,6 +70,13 @@ def build_registry_for_role(
         if name in banned:
             continue
         tool = defaults.get(name)
-        if tool is not None:
-            registry.register(tool)
+        if tool is None:
+            # A role allow-list naming a tool that doesn't exist is a wiring
+            # bug (typo/rename) – fail at startup, not as N confusing LLM
+            # retries from a silently under-tooled worker.
+            raise ValueError(
+                f"Role '{role}' lists unknown tool '{name}' "
+                f"(not in the default registry)"
+            )
+        registry.register(tool)
     return registry

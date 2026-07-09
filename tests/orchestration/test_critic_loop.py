@@ -7,7 +7,6 @@ re-dispatch, retry exhaustion, and escalation to the orchestrator.
 import json
 import time
 
-from mythos.config import MythosConfig
 from mythos.llm import LLMResponse, StubLLM
 from mythos.orchestration.bus import CRITIC_QUEUE, RESULTS_QUEUE, InMemoryBus, task_queue
 from mythos.orchestration.config import OrchestrationConfig
@@ -15,29 +14,12 @@ from mythos.orchestration.critic import CriticAgent
 from mythos.orchestration.matrix import HashEmbedder, InMemoryDataMatrix
 from mythos.orchestration.schemas import (
     StateUpdate,
-    TargetAgent,
     TaskParameters,
     TaskPayload,
     UpdateStatus,
 )
 
-
-def make_agent_config() -> MythosConfig:
-    return MythosConfig(llm_provider="stub", llm_api_key="unused", verbose=False)
-
-
-def make_payload(**overrides) -> TaskPayload:
-    defaults = dict(
-        system_instruction="EXECUTE_SUBTASK",
-        trace_id="trace-1",
-        task_id="task-1",
-        orchestrator_node="orchestrator-0",
-        target_agent=TargetAgent(role="backend_dev"),
-        task_parameters=TaskParameters(objective="Do the thing"),
-        callback_queue=CRITIC_QUEUE,
-    )
-    defaults.update(overrides)
-    return TaskPayload(**defaults)
+from .conftest import make_agent_config, make_payload
 
 
 def make_update(payload, status=UpdateStatus.SUCCESS, attempt=1, error_log=None):
@@ -206,6 +188,67 @@ class TestRetryExhaustion:
         critic.review(update)
         [body] = drain(bus, RESULTS_QUEUE)
         assert StateUpdate.from_json(body).status == UpdateStatus.FAILURE.value
+
+    def test_success_without_payload_fails_closed(self):
+        # A SUCCESS with no work order attached is unverifiable - it must
+        # never be forwarded as VALIDATED.
+        bus = InMemoryBus()
+        critic = make_critic(bus)
+        update = StateUpdate(
+            trace_id="t", task_id="k", agent_role="backend_dev",
+            status=UpdateStatus.SUCCESS.value, summary="trust me",
+        )
+        critic.review(update)
+        [body] = drain(bus, RESULTS_QUEUE)
+        result = StateUpdate.from_json(body)
+        assert result.status == UpdateStatus.FAILURE.value
+        assert "task_payload" in (result.error_log or "")
+
+
+class TestCriticCrashConversion:
+    def test_crash_in_review_publishes_structured_failure(self):
+        bus = InMemoryBus()
+        critic = make_critic(bus)
+
+        def explode(update):
+            raise RuntimeError("matrix exploded")
+
+        critic.review = explode
+        update = make_update(make_payload())
+        critic._on_message(update.to_json())
+
+        [body] = drain(bus, RESULTS_QUEUE)
+        result = StateUpdate.from_json(body)
+        assert result.status == UpdateStatus.FAILURE.value
+        assert result.task_id == update.task_id
+        assert "matrix exploded" in result.error_log
+        assert "Traceback" in result.error_log
+
+
+class TestStructuredVerdict:
+    def test_submit_verdict_tool_is_authoritative(self):
+        bus = InMemoryBus()
+
+        def factory():
+            return StubLLM([
+                LLMResponse(content=None, tool_name="submit_verdict",
+                            tool_args={"passed": False,
+                                       "reason": "AssertionError: expected 55"}),
+                LLMResponse(content=None, tool_name="finish",
+                            tool_args={"conclusion": "done reviewing"}),
+            ])
+
+        critic = CriticAgent(
+            bus=bus,
+            matrix=InMemoryDataMatrix(HashEmbedder()),
+            config=OrchestrationConfig(max_attempts=3),
+            agent_config=make_agent_config(),
+            llm_factory=factory,
+        )
+        critic.review(make_update(make_payload()))
+        [body] = drain(bus, task_queue("backend_dev"))
+        retry = TaskPayload.from_json(body)
+        assert "AssertionError: expected 55" in retry.error_log
 
 
 class TestFullLoopOverBus:

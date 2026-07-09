@@ -9,23 +9,30 @@ before the orchestrator sees it.  For each incoming StateUpdate the critic:
 * on worker ``SUCCESS``  – validates the result: first mechanically (the
   payload's ``validation_command``, exit code 0 = pass), otherwise by an LLM
   judgment run with a read/execute-only Tools API (the critic verifies, it
-  never fixes).
+  never fixes).  A missing work order fails closed: an unverifiable result
+  never validates.
 * on validation failure – injects the exact failure output (verbatim) into
   the payload's ``error_log``, bumps ``attempt``, and re-publishes the task
   straight back to the worker's queue as ``RETRY_SUBTASK``.  The orchestrator
   and the user are not involved: the debug loop is autonomous.
 * on pass / retries exhausted – publishes ``VALIDATED`` / ``FAILURE`` to
   ``q.orchestrator.results``; only then does the result bubble up.
+
+A crash anywhere in review becomes a structured ``FAILURE`` on the results
+queue (mirroring the worker's crash conversion) so the orchestrator is never
+left waiting on a silently swallowed result.
 """
 from __future__ import annotations
 
-import subprocess
+import dataclasses
 import threading
-from typing import Callable, Optional, Tuple
+import traceback
+from typing import Callable, List, Optional, Tuple
 
 from ..agent import MythosAgent
 from ..config import MythosConfig
-from ..llm import BaseLLM
+from ..llm import BaseLLM, create_llm
+from ..tools import Tool, run_shell_command
 from .bus import CRITIC_QUEUE, RESULTS_QUEUE, MessageBus, task_queue
 from .config import OrchestrationConfig
 from .matrix import DataMatrix
@@ -55,8 +62,10 @@ SUCCESS CRITERIA:
 WORKER'S REPORTED RESULT:
 {result}
 
-When you are certain, call `finish` with a conclusion that starts with
-exactly "VERDICT: PASS" or "VERDICT: FAIL: <exact reason and error output>".
+When you are certain, call the `submit_verdict` tool with your verdict and
+the exact reason (include verbatim error output on failure), then call
+`finish` with a conclusion that starts with exactly "VERDICT: PASS" or
+"VERDICT: FAIL: <exact reason>".
 """
 
 
@@ -78,6 +87,10 @@ class CriticAgent:
         self._config = config
         self._agent_config = agent_config or MythosConfig.from_env()
         self._llm_factory = llm_factory
+        # Production path: one SDK client reused across judgment runs (client
+        # construction + connection pooling is not free).  Test path: the
+        # factory is called per judgment for scripted StubLLMs.
+        self._shared_llm: Optional[BaseLLM] = None
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
@@ -97,10 +110,17 @@ class CriticAgent:
         )
         self._thread.start()
 
-    def stop(self) -> None:
+    def request_stop(self) -> None:
+        """Signal the consumer loop to stop (non-blocking)."""
         self._stop.set()
+
+    def stop(self) -> None:
+        self.request_stop()
+        self.join()
+
+    def join(self, timeout: float = 5.0) -> None:
         if self._thread is not None:
-            self._thread.join(timeout=5)
+            self._thread.join(timeout=timeout)
             self._thread = None
 
     # ------------------------------------------------------------------
@@ -109,7 +129,22 @@ class CriticAgent:
 
     def _on_message(self, body: str) -> None:
         update = StateUpdate.from_json(body)  # SchemaError -> bus redelivery path
-        self.review(update)
+        try:
+            self.review(update)
+        except Exception:  # noqa: BLE001 – a critic crash must not swallow the result
+            self._bus.publish(
+                RESULTS_QUEUE,
+                StateUpdate(
+                    trace_id=update.trace_id,
+                    task_id=update.task_id,
+                    agent_role=self.role,
+                    status=UpdateStatus.FAILURE.value,
+                    result_pointers=update.result_pointers,
+                    summary="Critic crashed while reviewing the result.",
+                    error_log=traceback.format_exc(),
+                    attempt=update.attempt,
+                ).to_json(),
+            )
 
     def review(self, update: StateUpdate) -> None:
         """Validate one worker StateUpdate and route the outcome."""
@@ -147,8 +182,9 @@ class CriticAgent:
     ) -> Tuple[bool, str]:
         """Return (passed, verbatim failure output)."""
         if payload is None:
-            # No work order attached: nothing to check against, accept as-is.
-            return True, ""
+            # Fail closed: with no work order there is no objective to verify
+            # against, and an unverifiable result must never validate.
+            return False, "Missing task_payload; cannot validate the result."
         command = payload.task_parameters.validation_command.strip()
         if command:
             return self._validate_mechanically(command)
@@ -157,25 +193,17 @@ class CriticAgent:
     @staticmethod
     def _validate_mechanically(command: str) -> Tuple[bool, str]:
         """Deterministic check: run the command; exit code 0 = pass."""
-        try:
-            result = subprocess.run(
-                command,
-                shell=True,  # noqa: S602 – command comes from the trusted workflow definition
-                capture_output=True,
-                text=True,
-                timeout=_VALIDATION_TIMEOUT_S,
-            )
-        except subprocess.TimeoutExpired:
-            return False, f"Validation command timed out after {_VALIDATION_TIMEOUT_S}s: {command}"
-        if result.returncode == 0:
+        returncode, output = run_shell_command(command, timeout=_VALIDATION_TIMEOUT_S)
+        if returncode == 0:
             return True, ""
-        output = ((result.stdout or "") + (result.stderr or "")).strip()
-        return False, f"[exit code {result.returncode}] $ {command}\n{output}"
+        if output.startswith("ERROR:"):
+            return False, f"{output}: $ {command}"
+        return False, f"[exit code {returncode}] $ {command}\n{output}"
 
     def _validate_by_judgment(
         self, update: StateUpdate, payload: TaskPayload
     ) -> Tuple[bool, str]:
-        """LLM judgment with a read/execute-only registry."""
+        """LLM judgment with a read/execute-only registry + structured verdict tool."""
         result_text = update.summary
         artifacts = self._matrix.get(update.result_pointers)
         if artifacts:
@@ -186,21 +214,61 @@ class CriticAgent:
             criteria=payload.task_parameters.success_criteria or "(none stated)",
             result=result_text,
         )
+
+        # Structured verdict channel: the tool call is authoritative; the
+        # conclusion-prefix protocol remains as a fallback for models that
+        # skip the tool.
+        captured: List[Tuple[bool, str]] = []
+
+        def submit_verdict(passed: bool, reason: str = "") -> str:
+            captured.append((bool(passed), str(reason)))
+            return "Verdict recorded. Now call `finish` with the same verdict."
+
+        registry = build_registry_for_role(self.role)
+        registry.register(Tool(
+            name="submit_verdict",
+            description=(
+                "Record your final verdict on the subtask. Call exactly once "
+                "when certain, before finishing."
+            ),
+            parameters={
+                "passed": {"type": "boolean", "description": "True if the result satisfies the objective."},
+                "reason": {"type": "string", "description": "Exact reason; include verbatim error output on failure."},
+            },
+            func=submit_verdict,
+            required=["passed"],
+        ))
+
         agent = MythosAgent(
             config=self._agent_config,
-            llm=self._llm_factory() if self._llm_factory else None,
-            registry=build_registry_for_role(self.role),
+            llm=self._judgment_llm(),
+            registry=registry,
         )
         conclusion = agent.run(prompt).strip()
+
+        if captured:
+            passed, reason = captured[-1]
+            return (True, "") if passed else (False, reason or conclusion)
 
         upper = conclusion.upper()
         if upper.startswith(_PASS_MARKER):
             return True, ""
         if upper.startswith(_FAIL_MARKER):
             return False, conclusion
-        # No explicit verdict: fail safe - an unverifiable result must not
-        # reach the orchestrator as validated.
+        # No verdict at all (e.g. the judgment run hit an iteration cap):
+        # fail safe - an unverifiable result must not validate.
         return False, f"Critic returned no explicit verdict: {conclusion}"
+
+    def _judgment_llm(self) -> BaseLLM:
+        if self._llm_factory is not None:
+            return self._llm_factory()
+        if self._shared_llm is None:
+            self._shared_llm = create_llm(
+                provider=self._agent_config.llm_provider,
+                model=self._agent_config.llm_model,
+                api_key=self._agent_config.llm_api_key,
+            )
+        return self._shared_llm
 
     # ------------------------------------------------------------------
     # Retry loop
@@ -213,15 +281,9 @@ class CriticAgent:
         failure_output: str,
     ) -> None:
         if payload is not None and update.attempt < self._config.max_attempts:
-            retry = TaskPayload(
+            retry = dataclasses.replace(
+                payload,
                 system_instruction=SystemInstruction.RETRY_SUBTASK.value,
-                trace_id=payload.trace_id,
-                task_id=payload.task_id,
-                orchestrator_node=payload.orchestrator_node,
-                target_agent=payload.target_agent,
-                task_parameters=payload.task_parameters,
-                constraints=payload.constraints,
-                callback_queue=payload.callback_queue,
                 attempt=update.attempt + 1,
                 error_log=failure_output,  # verbatim – the worker sees the exact trace
             )

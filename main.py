@@ -170,6 +170,8 @@ def run_swarm(args: argparse.Namespace, config: MythosConfig) -> int:
         print("error: --swarm requires a goal argument", file=sys.stderr)
         return 2
 
+    from mythos.orchestration.orchestrator import SwarmTimeoutError  # noqa: PLC0415
+
     orch_config = OrchestrationConfig.from_env()
     if args.bus is not None:
         orch_config.bus_backend = args.bus
@@ -177,13 +179,22 @@ def run_swarm(args: argparse.Namespace, config: MythosConfig) -> int:
         orch_config.matrix_backend = args.matrix
     orch_config.verbose = config.verbose
 
+    try:
+        workflow = get_workflow(args.workflow)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
     runtime = SwarmRuntime(
         config=orch_config,
         agent_config=config,
-        workflow=get_workflow(args.workflow),
+        workflow=workflow,
     )
     try:
         conclusion = runtime.run(args.goal)
+    except SwarmTimeoutError as exc:
+        print(f"error: the swarm timed out: {exc}", file=sys.stderr)
+        return 1
     finally:
         runtime.shutdown()
     print(conclusion)

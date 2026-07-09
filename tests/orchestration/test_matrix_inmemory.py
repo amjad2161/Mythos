@@ -107,6 +107,31 @@ class TestNavigate:
         assert found.index(system_node) < found.index(user_node) < found.index(agent_node)
 
 
+class TestTraceScoping:
+    def test_search_hits_from_other_traces_are_excluded(self):
+        matrix = make_matrix()
+        stale = store(matrix, "goal", "fibonacci python script old goal", trust=TRUST_USER)
+        stale.metadata["trace_id"] = "trace-OLD"
+        matrix.upsert(stale)
+        current = store(matrix, "goal", "fibonacci python script new goal", trust=TRUST_USER)
+        current.metadata["trace_id"] = "trace-NEW"
+        matrix.upsert(current)
+        shared = store(matrix, "system_instruction", "fibonacci ground rules")
+
+        found = matrix.navigate("fibonacci python script", top_k=5, trace_id="trace-NEW")
+        assert current in found
+        assert shared in found          # untagged ground truth always passes
+        assert stale not in found       # other trace excluded
+
+    def test_seed_pointers_bypass_trace_filter(self):
+        matrix = make_matrix()
+        node = store(matrix, "artifact", "explicitly pointed content")
+        node.metadata["trace_id"] = "trace-OTHER"
+        matrix.upsert(node)
+        found = matrix.navigate("unrelated", seed_ids=[node.node_id], trace_id="trace-MINE")
+        assert node in found            # explicit pointers are always honored
+
+
 class TestFusion:
     def test_verbatim_content_is_delimited(self):
         node = MemoryNode.create(

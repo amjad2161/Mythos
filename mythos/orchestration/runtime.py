@@ -129,10 +129,13 @@ class SwarmRuntime:
 
     def shutdown(self) -> None:
         """Stop all agents and release transport resources."""
-        self.orchestrator.stop()
-        self.critic.stop()
-        for worker in self.workers:
-            worker.stop()
+        # Two-phase: signal every consumer first, then join – total wait is
+        # the max of the joins, not the sum.
+        agents = [self.orchestrator, self.critic, *self.workers]
+        for agent in agents:
+            agent.request_stop()
+        for agent in agents:
+            agent.join()
         self.bus.close()
         self.matrix.close()
         self._started = False

@@ -135,6 +135,12 @@ class MythosAgent:
             verbose=self.config.verbose,
         )
 
+        # Structured outcome of the most recent run() – callers that need to
+        # branch on success (e.g. swarm workers) read these instead of
+        # pattern-matching the conclusion text.
+        self.last_run_ok: bool = True
+        self.last_halt_reason: Optional[str] = None
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -156,6 +162,8 @@ class MythosAgent:
         # Reset per-run state so a reused agent starts each goal cleanly
         # (fresh iteration/failure counters, no leftover system prompt).
         self._monitor.reset()
+        self.last_run_ok = True
+        self.last_halt_reason = None
 
         # Create initial plan
         plan = self._planner.new_plan(goal)
@@ -173,6 +181,8 @@ class MythosAgent:
             if task is None:
                 if plan.has_failures():
                     conclusion = "Some tasks failed. " + self._collect_results(plan)
+                    self.last_run_ok = False
+                    self.last_halt_reason = "task_failures"
                 elif not plan.is_complete():
                     # Remaining tasks exist but none is runnable (unsatisfied
                     # dependencies) – report the deadlock instead of silently
@@ -187,6 +197,8 @@ class MythosAgent:
                         f"{len(stuck)} task(s) could not be started due to "
                         f"unsatisfied dependencies: " + "; ".join(stuck)
                     )
+                    self.last_run_ok = False
+                    self.last_halt_reason = "deadlocked_plan"
                 break
 
             if self.config.verbose:
@@ -209,6 +221,8 @@ class MythosAgent:
                 if self.config.verbose:
                     print(f"\n[Monitor] Alert: {health.alert}")
                 conclusion = f"Agent stopped: {health.alert}"
+                self.last_run_ok = False
+                self.last_halt_reason = health.alert
                 break
 
             conclusion = result
@@ -227,6 +241,11 @@ class MythosAgent:
     def add_tool(self, tool) -> None:  # noqa: ANN001
         """Register a custom tool with the agent."""
         self._registry.register(tool)
+
+    @property
+    def monitor(self) -> Monitor:
+        """The agent's monitor (read access for callers tracking usage/health)."""
+        return self._monitor
 
     # ------------------------------------------------------------------
     # Private helpers

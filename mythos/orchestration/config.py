@@ -37,8 +37,10 @@ class OrchestrationConfig:
     max_attempts: int = 3
 
     # Orchestrator: how long to wait for a validated result per subtask
-    # before declaring the swarm stuck.
-    result_timeout_s: float = 600.0
+    # before declaring the swarm stuck.  0 = auto: derived from the subtask's
+    # constraints so the window always covers the permitted retry budget
+    # (max_attempts x (timeout_ms + validation slack)).
+    result_timeout_s: float = 0.0
 
     # Logical node id stamped on every TaskPayload this orchestrator issues.
     orchestrator_id: str = "orchestrator-0"
@@ -58,7 +60,7 @@ class OrchestrationConfig:
             matrix_collection=os.getenv("MYTHOS_MATRIX_COLLECTION", "mythos_matrix"),
             embedder=os.getenv("MYTHOS_EMBEDDER", "fastembed"),
             max_attempts=int(os.getenv("MYTHOS_MAX_ATTEMPTS", "3")),
-            result_timeout_s=float(os.getenv("MYTHOS_RESULT_TIMEOUT_S", "600")),
+            result_timeout_s=float(os.getenv("MYTHOS_RESULT_TIMEOUT_S", "0")),
             orchestrator_id=os.getenv("MYTHOS_ORCHESTRATOR_ID", "orchestrator-0"),
             verbose=os.getenv("MYTHOS_VERBOSE", "true").lower() != "false",
         )

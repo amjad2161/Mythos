@@ -126,6 +126,17 @@ class RabbitMQBus(MessageBus):
     the topology declarative and 1:1 with agent roles.  Manual acks: a message
     is acked only after its handler returns; a raising handler nacks with
     requeue on first delivery and drops on redelivery.
+
+    Long handlers vs. heartbeats: an agent handler can block for minutes (an
+    LLM task), during which a naive blocking consumer would service no AMQP
+    I/O and the broker would heartbeat-kill the connection, silently ending
+    the consumer thread.  ``consume`` therefore runs the handler in a side
+    thread while the consumer thread keeps pumping ``process_data_events``
+    (the canonical pika pattern), acking only after the handler finishes.
+
+    Publishing uses one shared, lock-guarded connection (pika connections are
+    not thread-safe) with a reconnect-and-retry on failure – an idle publisher
+    connection may be heartbeat-closed by the broker between publishes.
     """
 
     def __init__(self, broker_url: str) -> None:
@@ -138,36 +149,61 @@ class RabbitMQBus(MessageBus):
             ) from exc
         self._pika = pika
         self._params = pika.URLParameters(broker_url)
-        self._local = threading.local()
+        self._pub_lock = threading.Lock()
+        self._pub_conn = None
+        self._pub_chan = None
 
-    # -- connection management ------------------------------------------
+    # -- publisher connection management ---------------------------------
 
-    def _channel(self):  # noqa: ANN202 – pika channel, per-thread
-        conn = getattr(self._local, "conn", None)
-        if conn is None or conn.is_closed:
-            conn = self._pika.BlockingConnection(self._params)
-            self._local.conn = conn
-            self._local.chan = conn.channel()
-        chan = self._local.chan
-        if chan.is_closed:
-            self._local.chan = chan = conn.channel()
-        return chan
+    def _publisher_channel(self):  # noqa: ANN202 – pika channel; caller holds _pub_lock
+        if self._pub_conn is None or self._pub_conn.is_closed:
+            self._pub_conn = self._pika.BlockingConnection(self._params)
+            self._pub_chan = self._pub_conn.channel()
+        if self._pub_chan is None or self._pub_chan.is_closed:
+            self._pub_chan = self._pub_conn.channel()
+        return self._pub_chan
+
+    def _reset_publisher(self) -> None:  # caller holds _pub_lock
+        try:
+            if self._pub_conn is not None and self._pub_conn.is_open:
+                self._pub_conn.close()
+        except Exception:  # noqa: BLE001, S110 – best-effort teardown
+            pass
+        self._pub_conn = None
+        self._pub_chan = None
 
     # -- MessageBus interface -------------------------------------------
 
     def declare_queue(self, name: str) -> None:
-        self._channel().queue_declare(queue=name, durable=True)
+        with self._pub_lock:
+            for attempt in (1, 2):
+                try:
+                    self._publisher_channel().queue_declare(queue=name, durable=True)
+                    return
+                except Exception:  # noqa: BLE001 – stale connection; retry once fresh
+                    self._reset_publisher()
+                    if attempt == 2:
+                        raise
 
     def publish(self, queue_name: str, body: str) -> None:
-        self._channel().basic_publish(
-            exchange="",
-            routing_key=queue_name,
-            body=body.encode("utf-8"),
-            properties=self._pika.BasicProperties(
-                content_type="application/json",
-                delivery_mode=2,  # persistent
-            ),
+        properties = self._pika.BasicProperties(
+            content_type="application/json",
+            delivery_mode=2,  # persistent
         )
+        with self._pub_lock:
+            for attempt in (1, 2):
+                try:
+                    self._publisher_channel().basic_publish(
+                        exchange="",
+                        routing_key=queue_name,
+                        body=body.encode("utf-8"),
+                        properties=properties,
+                    )
+                    return
+                except Exception:  # noqa: BLE001 – stale connection; retry once fresh
+                    self._reset_publisher()
+                    if attempt == 2:
+                        raise
 
     def consume(
         self,
@@ -187,15 +223,33 @@ class RabbitMQBus(MessageBus):
                     break
                 if method is None:
                     continue
-                try:
-                    handler(body.decode("utf-8"))
-                except Exception as exc:  # noqa: BLE001
+
+                # Run the handler off-thread so this thread can keep the AMQP
+                # connection alive (heartbeats) for however long it takes.
+                outcome: Dict[str, BaseException] = {}
+
+                def _run(payload: str = body.decode("utf-8")) -> None:
+                    try:
+                        handler(payload)
+                    except BaseException as exc:  # noqa: BLE001
+                        outcome["exc"] = exc
+
+                runner = threading.Thread(
+                    target=_run, name=f"{queue_name}-handler", daemon=True
+                )
+                runner.start()
+                while runner.is_alive():
+                    conn.process_data_events(time_limit=0.5)
+                runner.join()
+
+                exc = outcome.get("exc")
+                if exc is None:
+                    chan.basic_ack(delivery_tag=method.delivery_tag)
+                else:
                     requeue = not method.redelivered
                     chan.basic_nack(delivery_tag=method.delivery_tag, requeue=requeue)
                     if not requeue:
                         print(f"[bus] message on '{queue_name}' dropped after redelivery: {exc}")
-                else:
-                    chan.basic_ack(delivery_tag=method.delivery_tag)
         finally:
             try:
                 chan.cancel()
@@ -204,6 +258,5 @@ class RabbitMQBus(MessageBus):
                 pass
 
     def close(self) -> None:
-        conn = getattr(self._local, "conn", None)
-        if conn is not None and conn.is_open:
-            conn.close()
+        with self._pub_lock:
+            self._reset_publisher()

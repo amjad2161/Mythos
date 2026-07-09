@@ -17,6 +17,7 @@ the orchestrator; the ``Workflow`` shape is the seam where that lands.
 """
 from __future__ import annotations
 
+import shlex
 from dataclasses import dataclass, field
 from typing import Dict, List
 
@@ -29,16 +30,25 @@ class WorkflowStep:
     # `{goal}` is substituted with the user's goal at dispatch time.
     objective_template: str
     # Deterministic critic check (shell command, exit 0 = pass); `{goal}` is
-    # substituted.  Empty -> the critic falls back to LLM judgment.
+    # substituted shell-quoted.  Empty -> the critic falls back to LLM judgment.
     validation_command_template: str = ""
     success_criteria: str = ""
     forbidden_modules: List[str] = field(default_factory=list)
+    # True for LLM-generated steps: templates are literal text, not .format
+    # templates (braces in generated objectives must not crash or substitute).
+    literal: bool = False
 
     def objective(self, goal: str) -> str:
+        if self.literal:
+            return self.objective_template
         return self.objective_template.format(goal=goal)
 
     def validation_command(self, goal: str) -> str:
-        return self.validation_command_template.format(goal=goal)
+        if self.literal:
+            return self.validation_command_template
+        # The command is executed with shell=True by the critic; the goal is
+        # user text, so it is inserted shell-quoted to prevent injection.
+        return self.validation_command_template.format(goal=shlex.quote(goal))
 
 
 @dataclass

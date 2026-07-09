@@ -9,13 +9,17 @@ services are provided as GitHub Actions service containers.
 """
 import os
 import socket
+import time
+import urllib.error
 import urllib.parse
+import urllib.request
 import uuid
 
 import pytest
 
 BROKER_URL = os.getenv("MYTHOS_BROKER_URL", "amqp://mythos:mythos@localhost:5672/")
 QDRANT_URL = os.getenv("MYTHOS_QDRANT_URL", "http://localhost:6333")
+_READY_WAIT_S = 30.0
 
 
 def _reachable(host: str, port: int, timeout: float = 1.0) -> bool:
@@ -24,6 +28,21 @@ def _reachable(host: str, port: int, timeout: float = 1.0) -> bool:
             return True
     except OSError:
         return False
+
+
+def _http_ready(url: str, wait_s: float = _READY_WAIT_S) -> bool:
+    """Poll an HTTP endpoint until it answers – TCP accept alone does not
+    guarantee the service is actually ready to serve requests."""
+    deadline = time.monotonic() + wait_s
+    while time.monotonic() < deadline:
+        try:
+            with urllib.request.urlopen(url, timeout=2):
+                return True
+        except urllib.error.HTTPError:
+            return True  # answered (even an error status means it's serving)
+        except OSError:
+            time.sleep(0.5)
+    return False
 
 
 def _url_host_port(url: str, default_port: int):
@@ -46,6 +65,8 @@ def qdrant_url() -> str:
     host, port = _url_host_port(QDRANT_URL, 6333)
     if not _reachable(host, port):
         pytest.skip(f"Qdrant unreachable at {host}:{port}")
+    if not _http_ready(f"{QDRANT_URL}/readyz"):
+        pytest.skip(f"Qdrant at {QDRANT_URL} accepted TCP but never became ready")
     return QDRANT_URL
 
 

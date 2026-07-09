@@ -21,7 +21,7 @@ import operator
 import os
 import subprocess
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 # Guard rails: tool output that flows back into the LLM context is capped so a
 # single command (e.g. `cat huge.log`) cannot exhaust the context window.
@@ -265,13 +265,14 @@ def _tool_list_directory(path: str = ".") -> str:
         return f"ERROR: {exc}"
 
 
-def _tool_run_shell(command: str, timeout: int = 30) -> str:
+def run_shell_command(command: str, timeout: int = 30) -> Tuple[int, str]:
     """
-    Execute a shell command and return combined stdout/stderr output.
+    Execute a shell command; return ``(returncode, capped combined output)``.
 
-    The command runs in a subprocess with a configurable timeout (default 30 s).
-    Dangerous operations (rm -rf /, etc.) are not prevented at this layer –
-    the agent's goal-alignment is expected to avoid destructive actions.
+    Shared by the ``run_shell`` tool and the critic's mechanical validation so
+    the two never drift.  Output is always capped with ``_truncate`` – it
+    flows back into LLM context either way.  A timeout returns
+    ``(-1, "ERROR: ...")``.
     """
     try:
         timeout = max(1, int(timeout))
@@ -285,14 +286,29 @@ def _tool_run_shell(command: str, timeout: int = 30) -> str:
             text=True,
             timeout=timeout,
         )
-        output = ((result.stdout or "") + (result.stderr or "")).strip()
-        if result.returncode != 0:
-            output = f"[exit code {result.returncode}]\n{output}".strip()
-        return _truncate(output) if output else "(no output)"
     except subprocess.TimeoutExpired:
-        return f"ERROR: Command timed out after {timeout} seconds"
+        return -1, f"ERROR: Command timed out after {timeout} seconds"
+    output = ((result.stdout or "") + (result.stderr or "")).strip()
+    return result.returncode, _truncate(output)
+
+
+def _tool_run_shell(command: str, timeout: int = 30) -> str:
+    """
+    Execute a shell command and return combined stdout/stderr output.
+
+    The command runs in a subprocess with a configurable timeout (default 30 s).
+    Dangerous operations (rm -rf /, etc.) are not prevented at this layer –
+    the agent's goal-alignment is expected to avoid destructive actions.
+    """
+    try:
+        returncode, output = run_shell_command(command, timeout)
     except Exception as exc:  # noqa: BLE001
         return f"ERROR: {exc}"
+    if output.startswith("ERROR:"):
+        return output
+    if returncode != 0:
+        output = f"[exit code {returncode}]\n{output}".strip()
+    return output if output else "(no output)"
 
 
 def _tool_memory_store(key: str, value: str) -> str:

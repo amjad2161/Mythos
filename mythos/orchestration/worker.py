@@ -27,7 +27,8 @@ from typing import Callable, List, Optional
 
 from ..agent import MythosAgent
 from ..config import MythosConfig
-from ..llm import BaseLLM
+from ..llm import BaseLLM, create_llm
+from ..tools import _truncate
 from .bus import CRITIC_QUEUE, MessageBus, task_queue
 from .config import OrchestrationConfig
 from .matrix import DataMatrix, fuse_context
@@ -39,10 +40,6 @@ from .schemas import (
     TaskPayload,
     UpdateStatus,
 )
-
-# Conclusion prefixes MythosAgent.run uses to report abnormal termination
-# (monitor stop, dependency deadlock, failed tasks).
-_FAILURE_MARKERS = ("Agent stopped:", "Agent halted:", "Some tasks failed.")
 
 
 class WorkerAgent:
@@ -66,8 +63,10 @@ class WorkerAgent:
         # applied on a copy (dataclasses.replace) for every payload.
         self._agent_config = agent_config or MythosConfig.from_env()
         # Injection seam: tests supply a factory returning a scripted StubLLM
-        # per task.  None -> MythosAgent builds the LLM from its config.
+        # per task.  Production path: one SDK client built lazily and reused
+        # across tasks (client construction + connection pools are not free).
         self._llm_factory = llm_factory
+        self._shared_llm: Optional[BaseLLM] = None
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
@@ -87,10 +86,17 @@ class WorkerAgent:
         )
         self._thread.start()
 
-    def stop(self) -> None:
+    def request_stop(self) -> None:
+        """Signal the consumer loop to stop (non-blocking)."""
         self._stop.set()
+
+    def stop(self) -> None:
+        self.request_stop()
+        self.join()
+
+    def join(self, timeout: float = 5.0) -> None:
         if self._thread is not None:
-            self._thread.join(timeout=5)
+            self._thread.join(timeout=timeout)
             self._thread = None
 
     # ------------------------------------------------------------------
@@ -125,10 +131,13 @@ class WorkerAgent:
         constraints = payload.constraints
 
         # 1. Autonomous navigation: explicit pointers + semantic search,
-        #    then graph traversal; results arrive trust-ranked.
+        #    then graph traversal; results arrive trust-ranked.  Scoped to
+        #    this payload's trace so stale runs in a persistent collection
+        #    cannot leak in as high-trust context.
         nodes = self._matrix.navigate(
             need=params.objective,
             seed_ids=params.context_pointers,
+            trace_id=payload.trace_id,
         )
         context_block = fuse_context(nodes)
 
@@ -156,31 +165,17 @@ class WorkerAgent:
         )
         agent = MythosAgent(
             config=agent_config,
-            llm=self._llm_factory() if self._llm_factory else None,
+            llm=self._task_llm(),
             registry=registry,
         )
 
         conclusion = agent.run(prompt)
         wall_ms = _elapsed_ms(started)
+        failed = not agent.last_run_ok
 
-        # 4. Enforce the (cooperative) deadline: work that finished past the
-        #    budget is reported as FAILURE so the critic/orchestrator can react.
-        if wall_ms > constraints.timeout_ms:
-            return self._state_update(
-                payload,
-                status=UpdateStatus.FAILURE,
-                summary=f"{self.role} exceeded timeout_ms.",
-                error_log=(
-                    f"Subtask ran {wall_ms} ms, exceeding the "
-                    f"{constraints.timeout_ms} ms constraint."
-                ),
-                wall_ms=wall_ms,
-            )
-
-        failed = conclusion.startswith(_FAILURE_MARKERS)
-
-        # 5. Persist the outcome as ground truth in the Data Matrix, linked
-        #    back to the context it was produced from.
+        # 4. Persist the outcome as ground truth in the Data Matrix, linked
+        #    back to the context it was produced from and tagged with the
+        #    trace so later runs don't inherit it as context.
         artifact = MemoryNode.create(
             node_type="artifact" if not failed else "failure_report",
             content=conclusion,
@@ -190,16 +185,33 @@ class WorkerAgent:
                 for pointer in params.context_pointers
             ],
         )
+        artifact.metadata["trace_id"] = payload.trace_id
         self._matrix.upsert(artifact)
 
+        # A completed run that overshot timeout_ms is still reported (with a
+        # flag) rather than failed – failing finished work would trigger a
+        # destructive re-execution of its side effects.  Mid-run enforcement
+        # is the Monitor's job.
         return self._state_update(
             payload,
             status=UpdateStatus.FAILURE if failed else UpdateStatus.SUCCESS,
-            summary=conclusion[:200],
+            summary=_truncate(conclusion, 200),
             error_log=conclusion if failed else None,
             wall_ms=wall_ms,
             result_pointers=[artifact.node_id],
+            deadline_exceeded=wall_ms > constraints.timeout_ms,
         )
+
+    def _task_llm(self) -> BaseLLM:
+        if self._llm_factory is not None:
+            return self._llm_factory()
+        if self._shared_llm is None:
+            self._shared_llm = create_llm(
+                provider=self._agent_config.llm_provider,
+                model=self._agent_config.llm_model,
+                api_key=self._agent_config.llm_api_key,
+            )
+        return self._shared_llm
 
     def _derive_iteration_cap(self, max_compute_tokens: int) -> int:
         """
@@ -222,7 +234,11 @@ class WorkerAgent:
         wall_ms: int,
         error_log: Optional[str] = None,
         result_pointers: Optional[List[str]] = None,
+        deadline_exceeded: bool = False,
     ) -> StateUpdate:
+        metrics = {"wall_ms": wall_ms, "attempt": payload.attempt}
+        if deadline_exceeded:
+            metrics["deadline_exceeded"] = True
         return StateUpdate(
             trace_id=payload.trace_id,
             task_id=payload.task_id,
@@ -231,7 +247,7 @@ class WorkerAgent:
             result_pointers=list(result_pointers or []),
             summary=summary,
             error_log=error_log,
-            metrics={"wall_ms": wall_ms, "attempt": payload.attempt},
+            metrics=metrics,
             attempt=payload.attempt,
             task_payload=json.loads(payload.to_json()),
         )

@@ -17,6 +17,8 @@ from __future__ import annotations
 import json
 import queue
 import threading
+import time
+import uuid
 from typing import Dict, List, Optional
 
 from ..planner import Plan, Task
@@ -65,6 +67,9 @@ class Orchestrator:
         self._config = config
         self._workflow = workflow
         self._results: "queue.Queue[StateUpdate]" = queue.Queue()
+        # Updates that arrived while we were waiting for a different task –
+        # kept (not dropped) and checked before blocking on the queue.
+        self._unmatched: Dict[str, StateUpdate] = {}
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
@@ -84,10 +89,17 @@ class Orchestrator:
         )
         self._thread.start()
 
-    def stop(self) -> None:
+    def request_stop(self) -> None:
+        """Signal the results consumer to stop (non-blocking)."""
         self._stop.set()
+
+    def stop(self) -> None:
+        self.request_stop()
+        self.join()
+
+    def join(self, timeout: float = 5.0) -> None:
         if self._thread is not None:
-            self._thread.join(timeout=5)
+            self._thread.join(timeout=timeout)
             self._thread = None
 
     def _on_result(self, body: str) -> None:
@@ -107,13 +119,19 @@ class Orchestrator:
         trace_id = new_trace_id()
 
         # Seed the Data Matrix: the system instruction is absolute ground
-        # truth (max trust, verbatim); the goal refines it.
+        # truth (max trust, verbatim); the goal refines it.  The system node
+        # id is derived from its content so repeated runs against the same
+        # persistent collection re-use one node instead of accumulating
+        # duplicates.
         system_node = MemoryNode.create(
             node_type="system_instruction",
             content=_SYSTEM_INSTRUCTION_TEXT,
             source="orchestrator",
             trust_score=TRUST_SYSTEM,
             verbatim_required=True,
+        )
+        system_node.node_id = str(
+            uuid.uuid5(uuid.NAMESPACE_OID, _SYSTEM_INSTRUCTION_TEXT)
         )
         self._matrix.upsert(system_node)
         goal_node = MemoryNode.create(
@@ -124,7 +142,14 @@ class Orchestrator:
             verbatim_required=True,
             edges=[{"relation": "refines", "target_id": system_node.node_id}],
         )
+        # Trace-tag the goal so later runs against the same collection don't
+        # surface it as high-trust context for unrelated goals.
+        goal_node.metadata["trace_id"] = trace_id
         self._matrix.upsert(goal_node)
+
+        # Declare each role's queue once up front (not per dispatch).
+        for role in {step.role for step in self._workflow.steps}:
+            self._bus.declare_queue(task_queue(role))
 
         # Decompose: workflow -> Plan (each step depends on the previous).
         plan = Plan(goal=goal)
@@ -198,25 +223,48 @@ class Orchestrator:
             callback_queue=CRITIC_QUEUE,
         )
         self._log(f"[Orchestrator] Dispatching task {payload.task_id} -> {step.role}")
-        self._bus.declare_queue(task_queue(step.role))
         self._bus.publish(task_queue(step.role), payload.to_json())
-        return self._wait_for(payload.task_id)
+        return self._wait_for(payload.task_id, payload.constraints)
 
-    def _wait_for(self, task_id: str) -> StateUpdate:
-        """Block until the terminal StateUpdate for *task_id* arrives."""
-        deadline = self._config.result_timeout_s
+    def _wait_for(self, task_id: str, constraints: Constraints) -> StateUpdate:
+        """
+        Block until the terminal StateUpdate for *task_id* arrives.
+
+        The wait window covers the full retry budget the constraints permit
+        (attempts x (execution + validation) plus slack), never less than the
+        configured ``result_timeout_s``, and is enforced as an absolute
+        deadline – a stream of unrelated updates cannot extend it.  Updates
+        for other tasks are buffered, not dropped.
+        """
+        if self._config.result_timeout_s > 0:
+            window_s = self._config.result_timeout_s
+        else:
+            # Auto (0): cover the full retry budget the constraints permit –
+            # attempts x (execution deadline + validation/overhead slack).
+            window_s = self._config.max_attempts * (
+                constraints.timeout_ms / 1000.0 + 150.0
+            )
+        deadline = time.monotonic() + window_s
         while True:
+            if task_id in self._unmatched:
+                return self._unmatched.pop(task_id)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise SwarmTimeoutError(
+                    f"No validated result for task {task_id} within {window_s:.0f}s."
+                )
             try:
-                update = self._results.get(timeout=deadline)
+                update = self._results.get(timeout=remaining)
             except queue.Empty:
                 raise SwarmTimeoutError(
-                    f"No validated result for task {task_id} within "
-                    f"{self._config.result_timeout_s}s."
+                    f"No validated result for task {task_id} within {window_s:.0f}s."
                 ) from None
             if update.task_id == task_id:
                 return update
-            # A stale update from an earlier goal/trace: log and keep waiting.
-            self._log(f"[Orchestrator] Ignoring stale update for task {update.task_id}")
+            # An update for a different task (earlier goal, concurrent
+            # dispatch in Phase B): keep it retrievable instead of dropping.
+            self._unmatched[update.task_id] = update
+            self._log(f"[Orchestrator] Buffered update for task {update.task_id}")
 
     def _resolve_result(self, update: StateUpdate) -> str:
         """Prefer the artifact content from the Data Matrix over the summary."""

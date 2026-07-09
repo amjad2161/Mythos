@@ -7,7 +7,6 @@ import json
 
 import pytest
 
-from mythos.config import MythosConfig
 from mythos.llm import LLMResponse, StubLLM
 from mythos.orchestration.bus import InMemoryBus
 from mythos.orchestration.config import OrchestrationConfig
@@ -16,32 +15,12 @@ from mythos.orchestration.roles import build_registry_for_role
 from mythos.orchestration.schemas import (
     Constraints,
     MemoryNode,
-    TargetAgent,
     TaskParameters,
-    TaskPayload,
     UpdateStatus,
 )
 from mythos.orchestration.worker import WorkerAgent
 
-
-def make_agent_config(**overrides) -> MythosConfig:
-    defaults = dict(llm_provider="stub", llm_api_key="unused", verbose=False)
-    defaults.update(overrides)
-    return MythosConfig(**defaults)
-
-
-def make_payload(**overrides) -> TaskPayload:
-    defaults = dict(
-        system_instruction="EXECUTE_SUBTASK",
-        trace_id="trace-1",
-        task_id="task-1",
-        orchestrator_node="orchestrator-0",
-        target_agent=TargetAgent(role="backend_dev"),
-        task_parameters=TaskParameters(objective="Do the thing"),
-        callback_queue="q.critic.review",
-    )
-    defaults.update(overrides)
-    return TaskPayload(**defaults)
+from .conftest import make_agent_config, make_payload
 
 
 def make_worker(responses, agent_config=None, matrix=None, bus=None):
@@ -80,6 +59,19 @@ class TestRoles:
     def test_unknown_role_raises(self):
         with pytest.raises(ValueError):
             build_registry_for_role("astronaut")
+
+    def test_role_listing_unknown_tool_raises(self):
+        # A typo in a role allow-list must fail at startup, not produce a
+        # silently under-tooled worker.
+        from mythos.orchestration import roles
+
+        original = roles.ROLE_TOOLS["backend_dev"]
+        roles.ROLE_TOOLS["backend_dev"] = original + ["no_such_tool"]
+        try:
+            with pytest.raises(ValueError, match="no_such_tool"):
+                build_registry_for_role("backend_dev")
+        finally:
+            roles.ROLE_TOOLS["backend_dev"] = original
 
 
 class TestWorkerHandle:
@@ -194,7 +186,9 @@ class TestWorkerHandle:
         assert "llm factory exploded" in update.error_log
         assert "Traceback" in update.error_log
 
-    def test_timeout_constraint_reports_failure(self):
+    def test_completed_work_past_deadline_is_flagged_not_failed(self):
+        # Failing already-finished work would trigger a destructive retry of
+        # its side effects; the overshoot is reported as a metric instead.
         import time
 
         class SlowStub(StubLLM):
@@ -207,8 +201,8 @@ class TestWorkerHandle:
         worker._llm_factory = SlowStub
         payload = make_payload(constraints=Constraints(timeout_ms=1))
         update = worker.handle(payload)
-        assert update.status == UpdateStatus.FAILURE.value
-        assert "timeout" in update.summary.lower() or "exceed" in update.error_log.lower()
+        assert update.status == UpdateStatus.SUCCESS.value
+        assert update.metrics.get("deadline_exceeded") is True
 
     def test_iteration_cap_derived_from_token_budget(self):
         worker = make_worker([], agent_config=make_agent_config(

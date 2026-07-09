@@ -50,6 +50,16 @@ jobs:
           - 6333:6333
 
     steps:
+      - name: Wait for Qdrant readiness
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:6333/readyz > /dev/null; then
+              echo "Qdrant is ready"; exit 0
+            fi
+            sleep 2
+          done
+          echo "Qdrant never became ready" >&2; exit 1
+
       - uses: actions/checkout@v4
 
       - name: Set up Python 3.12

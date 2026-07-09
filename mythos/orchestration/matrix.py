@@ -31,6 +31,7 @@ from __future__ import annotations
 import hashlib
 import math
 import re
+import threading
 from abc import ABC, abstractmethod
 from typing import Dict, List, Optional, Sequence
 
@@ -146,6 +147,7 @@ class DataMatrix(ABC):
         top_k: int = 3,
         hops: int = 1,
         seed_ids: Optional[Sequence[str]] = None,
+        trace_id: Optional[str] = None,
     ) -> List[MemoryNode]:
         """
         Autonomously assemble the context for *need*.
@@ -157,31 +159,44 @@ class DataMatrix(ABC):
            pull in adjacent, necessary context.
         3. Fusion ordering – deduplicate and rank by trust score (system
            instructions first) so higher-trust content overrides lower.
+
+        When *trace_id* is given, semantically-found nodes tagged with a
+        DIFFERENT trace are excluded – a persistent collection accumulates
+        goals/artifacts across runs, and a stale goal must not surface as
+        high-trust context for the current one.  Untagged nodes (shared
+        ground truth like system instructions) always pass; explicit
+        *seed_ids* always pass.
         """
         found: Dict[str, MemoryNode] = {}
         frontier: List[MemoryNode] = []
+
+        def admit(node: MemoryNode) -> bool:
+            if trace_id is None:
+                return True
+            node_trace = node.metadata.get("trace_id")
+            return node_trace is None or node_trace == trace_id
 
         for node in self.get(list(seed_ids or [])):
             found[node.node_id] = node
             frontier.append(node)
         if need.strip():
             for node in self.search(need, top_k=top_k):
-                if node.node_id not in found:
+                if node.node_id not in found and admit(node):
                     found[node.node_id] = node
                     frontier.append(node)
 
         for _ in range(max(0, hops)):
-            targets = [
+            targets = list(dict.fromkeys(
                 edge.get("target_id", "")
                 for node in frontier
                 for edge in node.edges
                 if edge.get("target_id") and edge["target_id"] not in found
-            ]
+            ))
             if not targets:
                 break
             frontier = []
             for node in self.get(targets):
-                if node.node_id not in found:
+                if node.node_id not in found and admit(node):
                     found[node.node_id] = node
                     frontier.append(node)
 
@@ -215,31 +230,42 @@ def fuse_context(nodes: Sequence[MemoryNode]) -> str:
 # ---------------------------------------------------------------------------
 
 class InMemoryDataMatrix(DataMatrix):
-    """Brute-force cosine search over an in-process dict."""
+    """
+    Brute-force cosine search over an in-process dict.
+
+    Shared by every agent thread in the swarm, so all access is serialized
+    with a lock – an unlocked dict would raise "dictionary changed size
+    during iteration" when a worker upserts while another searches.
+    """
 
     def __init__(self, embedder: Embedder) -> None:
         super().__init__(embedder)
         self._nodes: Dict[str, MemoryNode] = {}
         self._vectors: Dict[str, List[float]] = {}
+        self._lock = threading.Lock()
 
     def upsert(self, node: MemoryNode) -> str:
-        self._nodes[node.node_id] = node
-        self._vectors[node.node_id] = self._embedder.embed(node.content)
+        vector = self._embedder.embed(node.content)
+        with self._lock:
+            self._nodes[node.node_id] = node
+            self._vectors[node.node_id] = vector
         return node.node_id
 
     def get(self, node_ids: Sequence[str]) -> List[MemoryNode]:
-        return [self._nodes[i] for i in node_ids if i in self._nodes]
+        with self._lock:
+            return [self._nodes[i] for i in node_ids if i in self._nodes]
 
     def search(self, text: str, top_k: int = 3) -> List[MemoryNode]:
-        if not self._nodes:
-            return []
         query = self._embedder.embed(text)
-        scored = [
-            (_cosine(query, self._vectors[node_id]), node_id)
-            for node_id in self._nodes
-        ]
-        scored.sort(key=lambda pair: -pair[0])
-        return [self._nodes[node_id] for _, node_id in scored[:top_k]]
+        with self._lock:
+            if not self._nodes:
+                return []
+            scored = [
+                (_cosine(query, self._vectors[node_id]), node_id)
+                for node_id in self._nodes
+            ]
+            scored.sort(key=lambda pair: -pair[0])
+            return [self._nodes[node_id] for _, node_id in scored[:top_k]]
 
     def close(self) -> None:
         pass

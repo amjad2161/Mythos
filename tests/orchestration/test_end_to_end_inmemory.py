@@ -6,28 +6,18 @@ critic -> orchestrator, with scripted StubLLMs and a real artifact on disk.
 """
 import os
 
-from mythos.config import MythosConfig
 from mythos.llm import LLMResponse, StubLLM
 from mythos.orchestration.bus import InMemoryBus
-from mythos.orchestration.config import OrchestrationConfig
 from mythos.orchestration.matrix import HashEmbedder, InMemoryDataMatrix
 from mythos.orchestration.runtime import SwarmRuntime
 from mythos.orchestration.workflows import Workflow, WorkflowStep
 
-
-def make_agent_config() -> MythosConfig:
-    return MythosConfig(llm_provider="stub", llm_api_key="unused", verbose=False)
+from .conftest import make_agent_config, make_orch_config
 
 
 def make_runtime(workflow, llm_factories):
     return SwarmRuntime(
-        config=OrchestrationConfig(
-            bus_backend="inmemory",
-            matrix_backend="inmemory",
-            embedder="hash",
-            result_timeout_s=15.0,
-            verbose=False,
-        ),
+        config=make_orch_config(),
         agent_config=make_agent_config(),
         workflow=workflow,
         bus=InMemoryBus(),
