@@ -121,6 +121,34 @@ def parse_args() -> argparse.Namespace:
         ),
     )
 
+    pc_group = parser.add_argument_group("local install (PC)")
+    pc_group.add_argument(
+        "--init",
+        action="store_true",
+        help="Write the config template to ~/.mythos/env and exit.",
+    )
+    pc_group.add_argument(
+        "--doctor",
+        action="store_true",
+        help="Diagnose the local environment (API key, packages, services) and exit.",
+    )
+    pc_group.add_argument(
+        "--serve",
+        action="store_true",
+        help="Start the local web control panel for the swarm.",
+    )
+    pc_group.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="Bind address for --serve (default: 127.0.0.1).",
+    )
+    pc_group.add_argument(
+        "--port",
+        type=int,
+        default=8642,
+        help="Port for --serve (default: 8642).",
+    )
+
     args = parser.parse_args()
 
     if args.max_iterations is not None and args.max_iterations < 1:
@@ -168,17 +196,8 @@ def interactive_mode(agent: MythosAgent) -> None:
         print(f"\nConclusion: {conclusion}\n")
 
 
-def run_swarm(args: argparse.Namespace, config: MythosConfig) -> int:
-    """Run the goal through the Phase A multi-agent swarm."""
+def _build_orch_config(args: argparse.Namespace, config: MythosConfig):
     from mythos.orchestration import OrchestrationConfig  # noqa: PLC0415
-    from mythos.orchestration.runtime import SwarmRuntime  # noqa: PLC0415
-    from mythos.orchestration.workflows import get_workflow  # noqa: PLC0415
-
-    if not args.goal:
-        print("error: --swarm requires a goal argument", file=sys.stderr)
-        return 2
-
-    from mythos.orchestration.orchestrator import SwarmTimeoutError  # noqa: PLC0415
 
     orch_config = OrchestrationConfig.from_env()
     if args.bus is not None:
@@ -189,7 +208,16 @@ def run_swarm(args: argparse.Namespace, config: MythosConfig) -> int:
         orch_config.dynamic = True
         orch_config.fallback_workflow = args.workflow
     orch_config.verbose = config.verbose
+    return orch_config
 
+
+def run_swarm(args: argparse.Namespace, config: MythosConfig) -> int:
+    """Run one goal (or an interactive session) through the multi-agent swarm."""
+    from mythos.orchestration.orchestrator import SwarmTimeoutError  # noqa: PLC0415
+    from mythos.orchestration.runtime import SwarmRuntime  # noqa: PLC0415
+    from mythos.orchestration.workflows import get_workflow  # noqa: PLC0415
+
+    orch_config = _build_orch_config(args, config)
     try:
         workflow = get_workflow(args.workflow)
     except ValueError as exc:
@@ -202,13 +230,58 @@ def run_swarm(args: argparse.Namespace, config: MythosConfig) -> int:
         workflow=workflow,
     )
     try:
-        conclusion = runtime.run(args.goal)
-    except SwarmTimeoutError as exc:
-        print(f"error: the swarm timed out: {exc}", file=sys.stderr)
-        return 1
+        if args.goal:
+            try:
+                conclusion = runtime.run(args.goal)
+            except SwarmTimeoutError as exc:
+                print(f"error: the swarm timed out: {exc}", file=sys.stderr)
+                return 1
+            print(conclusion)
+            return 0
+
+        # Interactive swarm session – the runtime (and its shared Data
+        # Matrix) persists across goals.
+        print("Mythos swarm – interactive session  (type 'exit' or Ctrl-C to quit)\n")
+        while True:
+            try:
+                goal = input("Swarm goal > ").strip()
+            except (KeyboardInterrupt, EOFError):
+                print("\nGoodbye.")
+                return 0
+            if not goal:
+                continue
+            if goal.lower() in ("exit", "quit", "q"):
+                print("Goodbye.")
+                return 0
+            try:
+                print(f"\n{runtime.run(goal)}\n")
+            except SwarmTimeoutError as exc:
+                print(f"error: the swarm timed out: {exc}\n", file=sys.stderr)
     finally:
         runtime.shutdown()
-    print(conclusion)
+
+
+def run_serve(args: argparse.Namespace, config: MythosConfig) -> int:
+    """Start the local web control panel."""
+    from mythos.orchestration.runtime import SwarmRuntime  # noqa: PLC0415
+    from mythos.orchestration.server import serve_forever  # noqa: PLC0415
+    from mythos.orchestration.workflows import get_workflow  # noqa: PLC0415
+
+    orch_config = _build_orch_config(args, config)
+    try:
+        workflow = get_workflow(args.workflow)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    def runtime_factory():
+        return SwarmRuntime(
+            config=orch_config,
+            agent_config=config,
+            workflow=workflow,
+        )
+
+    serve_forever(runtime_factory, host=args.host, port=args.port)
     return 0
 
 
@@ -220,7 +293,33 @@ def main() -> int:
         print(f"Mythos {__version__}")
         return 0
 
+    # PC quality-of-life: pick up ~/.mythos/env and ./.env before anything
+    # reads the environment (exported variables always win).
+    from mythos.envfile import load_default_env_files, write_env_template  # noqa: PLC0415
+
+    load_default_env_files()
+
+    if args.init:
+        from mythos.envfile import USER_ENV_PATH  # noqa: PLC0415
+
+        if write_env_template():
+            print(f"Wrote config template to {USER_ENV_PATH}")
+            print("Edit it (at minimum: ANTHROPIC_API_KEY), then run: mythos --doctor")
+        else:
+            print(f"Config already exists at {USER_ENV_PATH} - leaving it untouched.")
+        return 0
+
+    if args.doctor:
+        from mythos.doctor import doctor_exit_code, format_report, run_doctor  # noqa: PLC0415
+
+        results = run_doctor()
+        print(format_report(results))
+        return doctor_exit_code(results)
+
     config = build_config(args)
+
+    if args.serve:
+        return run_serve(args, config)
 
     if args.swarm:
         return run_swarm(args, config)

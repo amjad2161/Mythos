@@ -75,6 +75,9 @@ class Orchestrator:
         # *workflow* serves only as the deterministic fallback.
         self._decomposer = decomposer
         self._ledger = TaskLedger(matrix)
+        # Observability: the ledger node id of the current/most recent run
+        # (read by the dashboard for live progress).
+        self.last_ledger_id: Optional[str] = None
         self._results: "queue.Queue[StateUpdate]" = queue.Queue()
         # Updates that arrived while we were waiting for a different task –
         # kept (not dropped) and checked before blocking on the queue.
@@ -126,6 +129,9 @@ class Orchestrator:
         terminally failed) StateUpdate, and advances the plan until complete.
         """
         trace_id = new_trace_id()
+        # Cleared up front so observers never attribute the previous run's
+        # ledger to this goal.
+        self.last_ledger_id = None
 
         # Seed the Data Matrix: the system instruction is absolute ground
         # truth (max trust, verbatim); the goal refines it.  The system node
@@ -198,6 +204,7 @@ class Orchestrator:
             ],
             goal_node_id=goal_node.node_id,
         )
+        self.last_ledger_id = ledger_id
         self._log(f"[Orchestrator] Ledger node: {ledger_id}")
 
         # Dispatch loop: every ready subtask is dispatched immediately, so

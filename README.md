@@ -58,6 +58,29 @@ Try it offline (no API key needed) with the deterministic stub backend:
 python main.py --provider stub "smoke test"
 ```
 
+## Run it on your PC (one command)
+
+```bash
+./scripts/launch.sh          # Linux/macOS   (add --offline for no-docker mode)
+.\scripts\launch.ps1         # Windows       (add -Offline for no-docker mode)
+```
+
+The launcher creates a virtualenv, installs Mythos, writes a config template
+to `~/.mythos/env` (put your `ANTHROPIC_API_KEY` there — it and `./.env` are
+loaded automatically), starts RabbitMQ + Qdrant if docker is available, runs
+the environment doctor, and opens the **local web control panel** at
+http://127.0.0.1:8642 — submit goals from the browser and watch each step of
+the Task Ledger progress live.
+
+Individual pieces:
+
+```bash
+python main.py --init      # write ~/.mythos/env config template
+python main.py --doctor    # diagnose: API key, packages, RabbitMQ/Qdrant, voice/nav
+python main.py --serve     # the web control panel (--port 8642 --host 127.0.0.1)
+python main.py --swarm     # interactive swarm shell (goal after goal, shared memory)
+```
+
 ## Multi-agent swarm (Phase A)
 
 Mythos also runs as a **multi-agent system**: an orchestrator decomposes the

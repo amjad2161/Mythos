@@ -300,6 +300,16 @@ summary.  Single-writer (orchestrator) by design — the matrix has no CAS.
 * HTTP webhook adapter for `callback_queue` → true `callback_webhook`.
 * `access_level` enforcement; matrix-similarity pre-filter for the router.
 
+### Local install layer (implemented)
+The PC-facing surface around the swarm: env-file configuration
+(`~/.mythos/env` + `./.env`, exported variables win — `envfile.py`),
+environment diagnostics (`mythos --doctor` — `doctor.py`), an interactive
+swarm shell (`mythos --swarm` with no goal), one-command launchers
+(`scripts/launch.sh` / `launch.ps1`), and a dependency-free local web
+control panel (`mythos --serve` — `orchestration/server.py`): goal
+submission, a serial run queue over one shared SwarmRuntime, and live Task
+Ledger progress per run.  Binds to 127.0.0.1 by design.
+
 ### Phase C — always-on autonomy (designed, not implemented)
 * Agents as separate processes/containers (compose services), always-on
   consumers; hard kill-timeouts via process supervision.
