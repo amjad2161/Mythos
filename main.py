@@ -89,6 +89,30 @@ def parse_args() -> argparse.Namespace:
         help="Print the Mythos version and exit.",
     )
 
+    swarm_group = parser.add_argument_group("multi-agent swarm (Phase A)")
+    swarm_group.add_argument(
+        "--swarm",
+        action="store_true",
+        help="Run the goal through the multi-agent swarm instead of a single agent.",
+    )
+    swarm_group.add_argument(
+        "--bus",
+        default=None,
+        choices=["rabbitmq", "inmemory"],
+        help="Message bus backend for --swarm (overrides MYTHOS_BUS).",
+    )
+    swarm_group.add_argument(
+        "--matrix",
+        default=None,
+        choices=["qdrant", "inmemory"],
+        help="Data Matrix backend for --swarm (overrides MYTHOS_MATRIX).",
+    )
+    swarm_group.add_argument(
+        "--workflow",
+        default="code_delivery",
+        help="Named rigid workflow to run for --swarm (default: code_delivery).",
+    )
+
     args = parser.parse_args()
 
     if args.max_iterations is not None and args.max_iterations < 1:
@@ -136,6 +160,36 @@ def interactive_mode(agent: MythosAgent) -> None:
         print(f"\nConclusion: {conclusion}\n")
 
 
+def run_swarm(args: argparse.Namespace, config: MythosConfig) -> int:
+    """Run the goal through the Phase A multi-agent swarm."""
+    from mythos.orchestration import OrchestrationConfig  # noqa: PLC0415
+    from mythos.orchestration.runtime import SwarmRuntime  # noqa: PLC0415
+    from mythos.orchestration.workflows import get_workflow  # noqa: PLC0415
+
+    if not args.goal:
+        print("error: --swarm requires a goal argument", file=sys.stderr)
+        return 2
+
+    orch_config = OrchestrationConfig.from_env()
+    if args.bus is not None:
+        orch_config.bus_backend = args.bus
+    if args.matrix is not None:
+        orch_config.matrix_backend = args.matrix
+    orch_config.verbose = config.verbose
+
+    runtime = SwarmRuntime(
+        config=orch_config,
+        agent_config=config,
+        workflow=get_workflow(args.workflow),
+    )
+    try:
+        conclusion = runtime.run(args.goal)
+    finally:
+        runtime.shutdown()
+    print(conclusion)
+    return 0
+
+
 def main() -> int:
     args = parse_args()
 
@@ -145,6 +199,10 @@ def main() -> int:
         return 0
 
     config = build_config(args)
+
+    if args.swarm:
+        return run_swarm(args, config)
+
     agent = MythosAgent(config=config)
 
     if args.goal:

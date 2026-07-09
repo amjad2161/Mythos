@@ -58,6 +58,39 @@ Try it offline (no API key needed) with the deterministic stub backend:
 python main.py --provider stub "smoke test"
 ```
 
+## Multi-agent swarm (Phase A)
+
+Mythos also runs as a **multi-agent system**: an orchestrator decomposes the
+goal, routes strict JSON work orders over RabbitMQ to specialised workers,
+a critic validates every result (autonomously retrying failed work with the
+exact error output), and all shared knowledge lives in a Qdrant-backed
+"Data Matrix" (vector search + knowledge graph). Full design:
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+```bash
+pip install -e ".[orchestration]"   # pika + qdrant-client + fastembed
+docker compose up -d                # RabbitMQ (5672) + Qdrant (6333)
+
+export ANTHROPIC_API_KEY=sk-ant-...
+python main.py --swarm "Write a Python script that prints the Fibonacci sequence to /tmp/fib.py"
+```
+
+Everything also runs offline with in-memory drivers (no Docker, no API key):
+
+```bash
+python main.py --swarm --provider stub --bus inmemory --matrix inmemory "demo"
+```
+
+(In stub mode the critic cannot obtain a real verdict, so this demonstrates
+the fail-safe path: three autonomous retries, then a reported failure.)
+
+Integration tests against live services:
+
+```bash
+docker compose up -d
+python -m pytest tests/integration -m integration
+```
+
 ## Configuration
 
 Everything is configurable via `MythosConfig`, CLI flags, or environment variables:

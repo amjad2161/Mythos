@@ -34,6 +34,11 @@ setup(
     ],
     extras_require={
         "openai": ["openai>=1.0.0"],
+        "orchestration": [
+            "pika>=1.3",
+            "qdrant-client>=1.9",
+            "fastembed>=0.3",
+        ],
         "dev": ["pytest>=7.0", "pytest-cov"],
     },
     entry_points={
