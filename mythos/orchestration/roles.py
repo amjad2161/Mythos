@@ -63,9 +63,10 @@ ROLE_TOOLS: Dict[str, List[str]] = {
         "think",
         "finish",
     ],
-    # Text-to-speech artifacts via the TTS sidecar.
+    # Speech in and out via the TTS/ASR sidecars.
     "voice": [
         "speak",
+        "transcribe",
         "read_file",
         "write_file",
         "list_directory",

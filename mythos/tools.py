@@ -231,6 +231,10 @@ def _tool_read_file(path: str) -> str:
 
 def _tool_write_file(path: str, content: str) -> str:
     """Write *content* to *path*, creating directories as needed."""
+    from .guardrails import check_path  # noqa: PLC0415
+    reason = check_path(path, write=True)
+    if reason:
+        return f"ERROR: {reason}"
     try:
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
         with open(path, "w", encoding="utf-8") as fh:
@@ -242,6 +246,10 @@ def _tool_write_file(path: str, content: str) -> str:
 
 def _tool_append_file(path: str, content: str) -> str:
     """Append *content* to *path*."""
+    from .guardrails import check_path  # noqa: PLC0415
+    reason = check_path(path, write=True)
+    if reason:
+        return f"ERROR: {reason}"
     try:
         with open(path, "a", encoding="utf-8") as fh:
             fh.write(content)
@@ -274,6 +282,10 @@ def run_shell_command(command: str, timeout: int = 30) -> Tuple[int, str]:
     flows back into LLM context either way.  A timeout returns
     ``(-1, "ERROR: ...")``.
     """
+    from .guardrails import check_shell  # noqa: PLC0415
+    reason = check_shell(command)
+    if reason:
+        return -1, f"ERROR: {reason}"
     try:
         timeout = max(1, int(timeout))
     except (TypeError, ValueError):
@@ -503,13 +515,14 @@ def build_default_registry() -> ToolRegistry:
         required=["conclusion"],
     ))
 
-    # Extended tool sets (web/geo/tts) live in sibling modules; imported
+    # Extended tool sets (web/geo/tts/asr) live in sibling modules; imported
     # lazily here to keep module import order acyclic.
+    from .tools_asr import ASR_TOOLS  # noqa: PLC0415
     from .tools_geo import GEO_TOOLS  # noqa: PLC0415
     from .tools_tts import TTS_TOOLS  # noqa: PLC0415
     from .tools_web import WEB_TOOLS  # noqa: PLC0415
 
-    for tool in (*WEB_TOOLS, *GEO_TOOLS, *TTS_TOOLS):
+    for tool in (*WEB_TOOLS, *GEO_TOOLS, *TTS_TOOLS, *ASR_TOOLS):
         registry.register(tool)
 
     return registry

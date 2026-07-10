@@ -42,5 +42,14 @@ services:
     ports:
       - "8000:8000"
 
+  # Optional ASR sidecar for voice INPUT (OpenAI-compatible
+  # /v1/audio/transcriptions). Set MYTHOS_ASR_URL=http://localhost:8001.
+  # Started only with: docker compose --profile voice-in up
+  whisper:
+    image: fedirz/faster-whisper-server:latest-cpu
+    profiles: ["voice-in"]
+    ports:
+      - "8001:8000"
+
 volumes:
   qdrant_data:

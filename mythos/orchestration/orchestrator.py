@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional
 from ..planner import Plan, TaskStatus
 from .bus import CRITIC_QUEUE, RESULTS_QUEUE, MessageBus, task_queue
 from .config import OrchestrationConfig
+from .events import NULL_HUB, EventHub
 from .ledger import TaskLedger
 from .matrix import DataMatrix
 from .schemas import (
@@ -66,6 +67,7 @@ class Orchestrator:
         config: OrchestrationConfig,
         workflow: Workflow,
         decomposer: Optional["DynamicDecomposer"] = None,
+        events: Optional[EventHub] = None,
     ) -> None:
         self._bus = bus
         self._matrix = matrix
@@ -75,6 +77,9 @@ class Orchestrator:
         # *workflow* serves only as the deterministic fallback.
         self._decomposer = decomposer
         self._ledger = TaskLedger(matrix)
+        # Real-time observability: lifecycle events pushed to subscribers
+        # (the control panel streams them to the browser over SSE).
+        self._events = events or NULL_HUB
         # Observability: the ledger node id of the current/most recent run
         # (read by the dashboard for live progress).
         self.last_ledger_id: Optional[str] = None
@@ -206,12 +211,18 @@ class Orchestrator:
         )
         self.last_ledger_id = ledger_id
         self._log(f"[Orchestrator] Ledger node: {ledger_id}")
+        self._events.emit(
+            "goal.started", trace_id=trace_id,
+            goal=goal, ledger_id=ledger_id, steps=len(workflow.steps),
+        )
 
         # Dispatch loop: every ready subtask is dispatched immediately, so
         # independent branches of the DAG execute concurrently; the loop then
         # waits for whichever in-flight subtask finishes first.
         tasks_by_plan_id = {t.id: t for t in plan.all_tasks()}
         results_by_index: Dict[int, str] = {}
+        pointers_by_index: Dict[int, List[str]] = {}   # step -> its artifact pointers
+        deps_by_index = {i: step.depends_on for i, step in enumerate(workflow.steps)}
         in_flight: Dict[str, int] = {}          # payload task_id -> plan task id
         constraints_in_flight: Dict[str, Constraints] = {}
         while True:
@@ -221,12 +232,24 @@ class Orchestrator:
                     break
                 task.status = TaskStatus.IN_PROGRESS
                 step = steps_by_plan_id[task.id]
+                idx = index_by_plan_id[task.id]
+                # Resource dependencies (HuggingGPT-style): a step's completed
+                # predecessors' artifact pointers become explicit inputs, so
+                # data flows along dependency edges, not just ordering.
+                dep_pointers: List[str] = []
+                for dep in (deps_by_index[idx] if deps_by_index[idx] is not None
+                            else ([idx - 1] if idx > 0 else [])):
+                    dep_pointers.extend(pointers_by_index.get(dep, []))
                 payload = self._dispatch(
                     trace_id, goal, step, goal_node.node_id,
-                    ledger_id, index_by_plan_id[task.id],
+                    ledger_id, idx, extra_pointers=dep_pointers,
                 )
                 in_flight[payload.task_id] = task.id
                 constraints_in_flight[payload.task_id] = payload.constraints
+                self._events.emit(
+                    "task.dispatched", trace_id=trace_id, task_id=payload.task_id,
+                    role=step.role, step=idx, objective=step.objective(goal)[:200],
+                )
 
             if not in_flight:
                 break  # nothing running, nothing ready -> terminal state
@@ -244,8 +267,13 @@ class Orchestrator:
                 summary = self._resolve_result(update)
                 task.mark_done(summary)
                 results_by_index[step_index] = summary
+                pointers_by_index[step_index] = list(update.result_pointers)
                 self._ledger.mark_terminal(
                     ledger_id, step_index, "validated", update.attempt, summary
+                )
+                self._events.emit(
+                    "task.validated", trace_id=trace_id, task_id=update.task_id,
+                    role=step.role, step=step_index, attempts=update.attempt,
                 )
             else:
                 task.mark_failed(update.error_log or update.summary)
@@ -257,11 +285,18 @@ class Orchestrator:
                     ledger_id, step_index, "failed", update.attempt,
                     update.error_log or update.summary,
                 )
+                self._events.emit(
+                    "task.failed", trace_id=trace_id, task_id=update.task_id,
+                    role=step.role, step=step_index, attempts=update.attempt,
+                    error=(update.error_log or update.summary)[:300],
+                )
 
         results = [results_by_index[i] for i in sorted(results_by_index)]
         if plan.has_failures():
+            self._events.emit("goal.failed", trace_id=trace_id, ledger_id=ledger_id)
             return "Goal failed. " + " | ".join(results or ["No validated results."])
         if plan.is_complete():
+            self._events.emit("goal.completed", trace_id=trace_id, ledger_id=ledger_id)
             return " | ".join(results) if results else "Goal processing finished."
         stuck = [t.description for t in plan.all_tasks() if t.status == TaskStatus.PENDING]
         return (
@@ -281,7 +316,11 @@ class Orchestrator:
         goal_node_id: str,
         ledger_id: str,
         step_index: int,
+        extra_pointers: Optional[List[str]] = None,
     ) -> TaskPayload:
+        # The goal node is always in scope; predecessor artifacts (resource
+        # dependencies) are prepended so the worker navigates from its inputs.
+        pointers = list(extra_pointers or []) + [goal_node_id]
         payload = TaskPayload(
             system_instruction=SystemInstruction.EXECUTE_SUBTASK.value,
             trace_id=trace_id,
@@ -290,7 +329,7 @@ class Orchestrator:
             target_agent=TargetAgent(role=step.role),
             task_parameters=TaskParameters(
                 objective=step.objective(goal),
-                context_pointers=[goal_node_id],
+                context_pointers=pointers,
                 validation_command=step.validation_command(goal),
                 success_criteria=step.success_criteria,
             ),

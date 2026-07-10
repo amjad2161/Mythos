@@ -19,6 +19,7 @@ from .bus import InMemoryBus, MessageBus, RabbitMQBus
 from .config import OrchestrationConfig
 from .critic import CriticAgent
 from .decomposer import DynamicDecomposer, create_decomposer_llm
+from .events import EventHub
 from .governor import CostGovernor
 from .matrix import (
     DataMatrix,
@@ -90,6 +91,8 @@ class SwarmRuntime:
             hourly_token_budget=self.config.hourly_token_budget,
             run_token_budget=self.config.run_token_budget,
         )
+        # Real-time lifecycle event stream (SSE to the control panel).
+        self.events = EventHub()
 
         # Dynamic mode can route to any known role, so every role gets a
         # worker; rigid mode only needs the workflow's roles.
@@ -133,6 +136,7 @@ class SwarmRuntime:
             config=self.config,
             workflow=self.workflow,
             decomposer=decomposer,
+            events=self.events,
         )
         self._started = False
 
@@ -165,6 +169,7 @@ class SwarmRuntime:
             agent.request_stop()
         for agent in agents:
             agent.join()
+        self.events.close()
         self.bus.close()
         self.matrix.close()
         self._started = False

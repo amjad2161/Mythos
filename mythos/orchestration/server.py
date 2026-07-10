@@ -28,6 +28,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable, Dict, List, Optional
 
+from .events import EventHub
 from .ledger import TaskLedger
 from .runtime import SwarmRuntime
 from .schemas import SchemaError
@@ -65,6 +66,9 @@ class RunManager:
         self._queue: "queue.Queue[str]" = queue.Queue()
         self._lock = threading.Lock()
         self._stop = threading.Event()
+        # A stable hub the SSE endpoint subscribes to before any goal exists;
+        # each runtime's per-run hub is forwarded into it.
+        self.hub = EventHub()
         self._thread = threading.Thread(
             target=self._worker, name="run-manager", daemon=True
         )
@@ -97,6 +101,10 @@ class RunManager:
         data["ledger"] = self._read_ledger(data.get("ledger_id", ""))
         return data
 
+    def event_hub(self):  # noqa: ANN201 – EventHub or None
+        """The live event hub of the running swarm (None before first goal)."""
+        return self._runtime.events if self._runtime is not None else None
+
     def status(self) -> Dict[str, Any]:
         runtime = self._runtime
         info: Dict[str, Any] = {
@@ -117,6 +125,7 @@ class RunManager:
     def shutdown(self) -> None:
         self._stop.set()
         self._queue.put("")  # unblock the worker
+        self.hub.close()
         self._thread.join(timeout=5)
         if self._runtime is not None:
             self._runtime.shutdown()
@@ -127,7 +136,27 @@ class RunManager:
         if self._runtime is None:
             self._runtime = self._runtime_factory()
             self._runtime.start()
+            # Forward the runtime's live events into the manager's stable hub
+            # so SSE subscribers attached before the first goal keep receiving.
+            threading.Thread(
+                target=self._forward_events,
+                args=(self._runtime.events,),
+                name="event-forwarder",
+                daemon=True,
+            ).start()
         return self._runtime
+
+    def _forward_events(self, source) -> None:  # noqa: ANN001 – EventHub
+        sub = source.subscribe()
+        try:
+            for event in sub.stream(self._stop):
+                if event.kind != "heartbeat":
+                    self.hub.emit(
+                        event.kind, trace_id=event.trace_id, task_id=event.task_id,
+                        role=event.role, ts_ms=event.ts_ms, **event.detail,
+                    )
+        finally:
+            source.unsubscribe(sub)
 
     def _worker(self) -> None:
         while not self._stop.is_set():
@@ -205,6 +234,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json(200, self.manager.status())
         elif self.path == "/api/runs":
             self._send_json(200, {"runs": self.manager.list_runs()})
+        elif self.path == "/api/events":
+            self._stream_events()
         elif self.path.startswith("/api/runs/"):
             run = self.manager.get_run(self.path.rsplit("/", 1)[-1])
             if run is None:
@@ -213,6 +244,35 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send_json(200, run)
         else:
             self._send_json(404, {"error": "not found"})
+
+    def _stream_events(self) -> None:
+        """Server-Sent Events: push swarm lifecycle events to the browser live."""
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "keep-alive")
+        self.end_headers()
+        stop = threading.Event()
+        sub = self.manager.hub.subscribe()
+        try:
+            # Replay recent history so a freshly-opened tab has context.
+            for event in self.manager.hub.recent(30):
+                self._write_sse(event)
+            for event in sub.stream(stop):
+                if event.kind == "heartbeat":
+                    self.wfile.write(b": keep-alive\n\n")
+                else:
+                    self._write_sse(event)
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass  # the browser closed the tab
+        finally:
+            stop.set()
+            self.manager.hub.unsubscribe(sub)
+
+    def _write_sse(self, event) -> None:  # noqa: ANN001 – Event
+        payload = json.dumps(event.to_dict(), ensure_ascii=False)
+        self.wfile.write(f"event: {event.kind}\ndata: {payload}\n\n".encode("utf-8"))
 
     def do_POST(self) -> None:  # noqa: N802 – http.server API
         if self.path != "/api/goals":
@@ -318,6 +378,7 @@ border:1px solid var(--line);border-radius:6px;padding:12px;max-height:340px;ove
 </div>
 <div class="panel"><div class="dim">RUNS</div><div id="runs">none yet</div></div>
 <div class="panel" id="detail" hidden><div class="dim">RUN DETAIL</div><div id="detailBody"></div></div>
+<div class="panel"><div class="dim">LIVE EVENT STREAM (SSE)</div><div id="events" class="dim">waiting for events…</div></div>
 </main>
 <script>
 let selected=null;
@@ -362,6 +423,24 @@ $('f').addEventListener('submit',async e=>{
   const run=await r.json();if(run.run_id)select(run.run_id);
   refresh();
 });
-refresh();setInterval(refresh,1500);
+// Real-time push: the SSE stream drives instant refreshes (no waiting for
+// the poll tick) and renders a live event log.
+const evLog=[];
+function connectSSE(){
+  const src=new EventSource('/api/events');
+  src.onmessage=e=>onEvent(JSON.parse(e.data));
+  ['goal.started','task.dispatched','task.validated','task.failed','goal.completed','goal.failed']
+    .forEach(k=>src.addEventListener(k,e=>onEvent(JSON.parse(e.data))));
+  src.onerror=()=>{/* EventSource auto-reconnects */};
+}
+function onEvent(ev){
+  const icon={'goal.started':'▶','task.dispatched':'→','task.validated':'✓',
+    'task.failed':'✗','goal.completed':'★','goal.failed':'✗'}[ev.kind]||'·';
+  const line=`${icon} ${ev.kind}${ev.role?(' ['+ev.role+']'):''}${ev.step!=null?(' #'+ev.step):''}`;
+  evLog.unshift(line);if(evLog.length>40)evLog.pop();
+  $('events').innerHTML=evLog.map(esc).join('<br>');
+  refresh(); // push-triggered refresh = immediate, not on the 1.5s tick
+}
+connectSSE();refresh();setInterval(refresh,2500);
 </script></body></html>
 """
