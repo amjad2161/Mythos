@@ -119,6 +119,7 @@ class RunManager:
                 "workflow": runtime.workflow.name,
                 "roles": sorted(w.role for w in runtime.workers),
                 "tokens_last_hour": runtime.governor.window_total,
+                "posture": runtime.governor.posture().posture.name,
             })
         return info
 

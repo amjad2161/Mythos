@@ -419,6 +419,8 @@ an outward step (e.g. "email it to finance") would hit the approval gate.
 | Web fetch (SSRF-hardened) | **built** | `tools_web.py`, `researcher` |
 | **Local / free-model provider** | **built** | `llm.py` `LocalLLM` (Ollama/OpenAI-compatible) |
 | **Specialist persona library** | **built** | `personas/library/` (24 imported specialists) + `--persona` |
+| **Graded health posture ladder** | **built** | `posture.py` + `CostGovernor.posture()` (NORMAL→REDUCED→PAUSED→HALT) |
+| **Event-sourced audit log + replay** | **built** | `audit.py` (`MYTHOS_AUDIT_LOG`), teed through `EventHub` |
 | Entity/relationship graph memory | designed | §3.3 |
 | HITL approvals + audit | designed | §5 |
 | Connector adapters (cloud cal/mail) | designed | §4.3 |

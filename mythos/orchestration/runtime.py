@@ -91,8 +91,15 @@ class SwarmRuntime:
             hourly_token_budget=self.config.hourly_token_budget,
             run_token_budget=self.config.run_token_budget,
         )
-        # Real-time lifecycle event stream (SSE to the control panel).
-        self.events = EventHub()
+        # Real-time lifecycle event stream (SSE to the control panel), with an
+        # optional durable audit sink (MYTHOS_AUDIT_LOG) for deterministic replay.
+        import os as _os  # noqa: PLC0415
+
+        from .audit import AuditLog  # noqa: PLC0415
+
+        audit = AuditLog() if _os.getenv("MYTHOS_AUDIT_LOG") else None
+        self.audit = audit
+        self.events = EventHub(audit=audit)
 
         # Dynamic mode can route to any known role, so every role gets a
         # worker; rigid mode only needs the workflow's roles.
