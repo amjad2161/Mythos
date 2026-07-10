@@ -58,6 +58,22 @@ Try it offline (no API key needed) with the deterministic stub backend:
 python main.py --provider stub "smoke test"
 ```
 
+Run it on a **free / local model** (Ollama, LM Studio, llama.cpp, vLLM, Groq) —
+any OpenAI-compatible endpoint, no API key, no extra dependencies:
+
+```bash
+ollama serve && ollama pull llama3.1        # or any local server
+python main.py --provider local --model llama3.1 "Write a haiku about the sea"
+# point elsewhere with MYTHOS_LOCAL_URL=http://host:port/v1
+```
+
+Adopt a **specialist persona** from the bundled library for a single run:
+
+```bash
+python main.py --list-personas                       # 24 specialists
+python main.py --persona engineering-backend-architect "Design a rate limiter"
+```
+
 ## Engineering dossier
 
 The full delivery documentation set lives in [`docs/`](docs/):
@@ -72,6 +88,8 @@ The full delivery documentation set lives in [`docs/`](docs/):
 | [QA.md](docs/QA.md) | Test architecture, coverage map, gap analysis, release quality gates |
 | [PERFORMANCE.md](docs/PERFORMANCE.md) | Measured benchmarks (`scripts/bench.py`), capacity envelope, limits |
 | [VISION_MAP.md](docs/VISION_MAP.md) | The full autonomous-agent vision mapped layer-by-layer onto the code |
+| [ORDERING.md](docs/ORDERING.md) | End-to-end FIFO/LIFO/priority map of every queue, buffer, window, and eviction |
+| [STRUCTURE.md](docs/STRUCTURE.md) | Package layout organized by concern (core / tools / pc / orchestration) |
 | [JARVIS_ANALYSIS.md](docs/JARVIS_ANALYSIS.md) | Comparison vs Microsoft JARVIS/HuggingGPT, Leon AI; what to adopt/offer |
 
 ## Run it on your PC (one command)
@@ -95,6 +113,7 @@ python main.py --init      # write ~/.mythos/env config template
 python main.py --doctor    # diagnose: API key, packages, RabbitMQ/Qdrant, voice/nav
 python main.py --serve     # the web control panel (--port 8642 --host 127.0.0.1)
 python main.py --swarm     # interactive swarm shell (goal after goal, shared memory)
+python main.py --schedule knowledge/routines.example.json   # proactive routine daemon
 ```
 
 ## Multi-agent swarm (Phase A)
@@ -141,6 +160,7 @@ Specialised roles and their services:
 | `voice` | `speak` → OpenAI-compatible TTS sidecar | `MYTHOS_TTS_URL` (e.g. `docker compose --profile voice up` — supertonic: MIT code, OpenRAIL-M model weights) |
 | `assistant` | digital secretary: `pa_add_task/list_tasks/complete_task`, `pa_add_note/list_notes`, `pa_set_reminder/due_reminders`, `pa_draft_email`, `pa_daily_brief` | local JSON store (`MYTHOS_ASSISTANT_DIR`, default `~/.mythos/assistant`) — offline |
 | `operator` | computer use: `open_url`, `open_path`, `clipboard_get/set`, `notify`, `screenshot` (no shell) | OS backends where present (xdg-open, xclip/wl-clip, notify-send, mss/scrot); degrades gracefully |
+| `browser` | web use: `browser_navigate`, `browser_read_page` (indexed DOM), `browser_click`, `browser_fill`, `browser_screenshot` (no shell) | Playwright + Chromium (`pip install playwright && playwright install chromium`); degrades to read-only `web_fetch` when absent |
 
 Every role carries a Markdown **persona** (override with `MYTHOS_PERSONA_DIR`);
 token spend is metered for real (`LLMResponse.usage` → Monitor budgets +
@@ -186,7 +206,9 @@ Everything is configurable via `MythosConfig`, CLI flags, or environment variabl
 |-----------------------------|------------------------|---------|
 | `ANTHROPIC_API_KEY`         | —                      | API key for the default Claude backend |
 | `MYTHOS_API_KEY`            | —                      | Overrides the API key for any provider |
-| `MYTHOS_LLM_PROVIDER`       | `anthropic`            | `anthropic` \| `openai` \| `stub` |
+| `MYTHOS_LLM_PROVIDER`       | `anthropic`            | `anthropic` \| `openai` \| `local` \| `stub` |
+| `MYTHOS_LOCAL_URL`          | `http://localhost:11434/v1` | OpenAI-compatible base URL for `--provider local`/`ollama` (Ollama, LM Studio, llama.cpp, vLLM, Groq) |
+| `MYTHOS_LOCAL_API_KEY`      | `local`                | Bearer token for the local endpoint (most local servers ignore it) |
 | `MYTHOS_LLM_MODEL`          | `claude-opus-4-8`      | Model ID |
 | `MYTHOS_LLM_MAX_TOKENS`     | `8192`                | Max output tokens per LLM call |
 | `MYTHOS_LLM_TEMPERATURE`    | `0.2`                  | Sampling temperature (OpenAI backend only; current Claude models don't accept it) |
@@ -197,6 +219,8 @@ Everything is configurable via `MythosConfig`, CLI flags, or environment variabl
 | `MYTHOS_PERSIST_MEMORY`     | `false`                | Persist long-term memory to disk |
 | `MYTHOS_MEMORY_PATH`        | `mythos_memory.json`   | Long-term memory file |
 | `MYTHOS_VERBOSE`            | `true`                 | Set `false` to silence progress output |
+| `MYTHOS_AUDIT_LOG`          | —                      | Path to a JSONL audit log; when set, every swarm lifecycle event is durably recorded for deterministic replay (`orchestration.audit.replay`) |
+| `MYTHOS_APPROVALS`          | `off`                  | Set `on` to require human approval for outward/destructive tool calls (register an approver via `mythos.approvals.set_approver`); `MYTHOS_AUTO_APPROVE=on` allows them unattended |
 
 CLI flags (`--provider`, `--model`, `--api-key`, `--max-iterations`, `--quiet`, …) override
 environment variables. See `python main.py --help`.

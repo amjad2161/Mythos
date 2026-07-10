@@ -164,6 +164,58 @@ class TestScreenshot:
         assert _tool_screenshot(str(target)) == f"Saved screenshot to {target}"
 
 
+class TestActionVocabulary:
+    def _fake_backend(self, monkeypatch):
+        calls = []
+
+        class Fake:
+            def move(self, x, y): calls.append(("move", x, y))
+            def click(self, x, y, button, count): calls.append(("click", x, y, button, count))
+            def type(self, text): calls.append(("type", text))
+            def key(self, keys): calls.append(("key", keys))
+            def scroll(self, direction, amount): calls.append(("scroll", direction, amount))
+
+        from mythos.tools_computer import set_action_backend
+        set_action_backend(Fake())
+        return calls
+
+    def teardown_method(self):
+        from mythos.tools_computer import set_action_backend
+        set_action_backend(None)
+
+    def test_move_click_type_key_scroll(self, monkeypatch):
+        from mythos.tools_computer import (
+            _tool_computer_click, _tool_computer_key, _tool_computer_move,
+            _tool_computer_scroll, _tool_computer_type,
+        )
+        calls = self._fake_backend(monkeypatch)
+        assert _tool_computer_move(100, 200) == "Moved cursor to (100, 200)"
+        assert "left-clicked at (10, 20)" in _tool_computer_click(10, 20)
+        assert _tool_computer_type("hi").startswith("Typed")
+        assert _tool_computer_key("ctrl+s") == "Pressed ctrl+s"
+        assert _tool_computer_scroll("down", 2) == "Scrolled down ×2"
+        assert ("move", 100, 200) in calls
+        assert ("click", 10, 20, "left", 1) in calls
+        assert ("key", "ctrl+s") in calls
+
+    def test_bad_args(self, monkeypatch):
+        from mythos.tools_computer import (
+            _tool_computer_click, _tool_computer_key, _tool_computer_scroll,
+        )
+        self._fake_backend(monkeypatch)
+        assert _tool_computer_click(1, 2, button="middleish").startswith("ERROR:")
+        assert _tool_computer_key("   ").startswith("ERROR:")
+        assert _tool_computer_scroll("sideways").startswith("ERROR:")
+
+    def test_no_backend_degrades(self, monkeypatch):
+        from mythos.tools_computer import _tool_computer_click, set_action_backend
+        set_action_backend(None)
+        monkeypatch.setattr(
+            "mythos.tools_computer._get_action_backend", lambda: None
+        )
+        assert _tool_computer_click(1, 2).startswith("ERROR: no input backend")
+
+
 class TestRegistrationAndRoles:
     def test_computer_and_assistant_tools_registered(self):
         from mythos.tools import build_default_registry

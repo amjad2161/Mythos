@@ -22,6 +22,8 @@ import time
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, Iterator, List, Optional
 
+from ..ordering import BoundedFifo
+
 
 @dataclass
 class Event:
@@ -85,13 +87,23 @@ _HEARTBEAT = Event(kind="heartbeat")
 class EventHub:
     """Thread-safe fan-out of :class:`Event`s to many subscribers."""
 
-    def __init__(self, per_subscriber_buffer: int = 512, history: int = 200) -> None:
+    def __init__(
+        self,
+        per_subscriber_buffer: int = 512,
+        history: int = 200,
+        audit: Any = None,
+    ) -> None:
         self._subs: List[_Subscription] = []
         self._lock = threading.Lock()
         self._seq = 0
         self._buffer = per_subscriber_buffer
-        self._history_cap = history
-        self._history: List[Event] = []
+        # Replay buffer: a FIFO sliding window that keeps the most recent
+        # `history` events (drop-oldest on overflow) — see mythos.ordering.
+        self._history: BoundedFifo = BoundedFifo(maxlen=history)
+        # Optional durable sink: anything with append(kind, ts_ms=..., **detail)
+        # (an AuditLog). Ephemeral fan-out stays the hub's job; persistence is
+        # delegated so the two concerns don't entangle.
+        self._audit = audit
 
     # -- producer side ---------------------------------------------------
 
@@ -118,10 +130,18 @@ class EventHub:
                 role=role,
                 detail=detail,
             )
-            self._history.append(event)
-            if len(self._history) > self._history_cap:
-                self._history = self._history[-self._history_cap:]
+            self._history.push(event)   # FIFO drop-oldest at the bound
             subs = list(self._subs)
+            audit = self._audit
+        if audit is not None:
+            # Persistence must never break event fan-out — the durable sink is
+            # best-effort (a bad payload / disk error can't stall the swarm).
+            try:
+                audit.append(
+                    kind, ts_ms=stamp, trace_id=trace_id, task_id=task_id, role=role, **detail
+                )
+            except Exception:  # noqa: BLE001 – audit is best-effort, never fatal
+                pass
         for sub in subs:
             sub.offer(event)
         return event
@@ -141,8 +161,8 @@ class EventHub:
         sub.close()
 
     def recent(self, limit: int = 50) -> List[Event]:
-        with self._lock:
-            return self._history[-limit:]
+        # Oldest → newest, most-recent `limit` (BoundedFifo is self-locked).
+        return self._history.recent(limit)
 
     def close(self) -> None:
         with self._lock:

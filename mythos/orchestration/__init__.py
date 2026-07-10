@@ -50,6 +50,12 @@ __all__ = [
     "ingest_taxonomy",
     "parse_taxonomy",
     "IngestResult",
+    "Posture",
+    "evaluate_posture",
+    "AuditLog",
+    "replay",
+    "Scheduler",
+    "Routine",
 ]
 
 # Heavier members pull in the agent stack / optional deps; kept lazy so that
@@ -63,6 +69,12 @@ _LAZY = {
     "ingest_taxonomy": ("ingest", "ingest_taxonomy"),
     "parse_taxonomy": ("ingest", "parse_taxonomy"),
     "IngestResult": ("ingest", "IngestResult"),
+    "Posture": ("posture", "Posture"),
+    "evaluate_posture": ("posture", "evaluate_posture"),
+    "AuditLog": ("audit", "AuditLog"),
+    "replay": ("audit", "replay"),
+    "Scheduler": ("scheduler", "Scheduler"),
+    "Routine": ("scheduler", "Routine"),
 }
 
 

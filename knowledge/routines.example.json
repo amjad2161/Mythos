@@ -1,0 +1,19 @@
+[
+  {
+    "id": "daily-brief",
+    "name": "Morning briefing",
+    "goal": "Produce today's daily briefing from my open tasks, due reminders, and recent notes.",
+    "daily_at": "07:00",
+    "quiet_start": 22,
+    "quiet_end": 6,
+    "access_level": "standard"
+  },
+  {
+    "id": "inbox-triage",
+    "name": "Hourly inbox triage",
+    "goal": "Triage new mail and draft replies to anything urgent (draft only, do not send).",
+    "interval_s": 3600,
+    "quiet_start": 22,
+    "quiet_end": 6
+  }
+]

@@ -417,12 +417,17 @@ an outward step (e.g. "email it to finance") would hit the approval gate.
 | **Digital secretary (local)** | **built** | `tools_assistant.py`, `assistant` role |
 | **Computer-use seam** | **built** | `tools_computer.py`, `operator` role |
 | Web fetch (SSRF-hardened) | **built** | `tools_web.py`, `researcher` |
+| **Local / free-model provider** | **built** | `llm.py` `LocalLLM` (Ollama/OpenAI-compatible) |
+| **Specialist persona library** | **built** | `personas/library/` (24 imported specialists) + `--persona` |
+| **Graded health posture ladder** | **built** | `posture.py` + `CostGovernor.posture()` (NORMAL→REDUCED→PAUSED→HALT) |
+| **Event-sourced audit log + replay** | **built** | `audit.py` (`MYTHOS_AUDIT_LOG`), teed through `EventHub` |
 | Entity/relationship graph memory | designed | §3.3 |
-| HITL approvals + audit | designed | §5 |
+| **HITL approvals gate** | **built** | `approvals.py` (`MYTHOS_APPROVALS`), gated at `ToolRegistry.call` |
 | Connector adapters (cloud cal/mail) | designed | §4.3 |
-| Browser automation role | designed | §4.2 |
-| Scheduler + steering + Boss front-end | designed | §2, §4.4 |
-| Full computer perception→action loop | roadmap | §4.1 |
+| **Browser automation role** | **built** | `tools_browser.py`, `browser` role (Playwright + `web_fetch` fallback) |
+| **Scheduler daemon (routines)** | **built** | `scheduler.py`, `mythos --schedule` |
+| **Boss chat console + steering/cancel** | **built** | `server.py` chat UI + `Orchestrator.request_cancel` |
+| **Computer perception→action vocabulary** | **built** | `tools_computer.py` (move/click/type/key/scroll); live desktop = roadmap |
 
 ---
 

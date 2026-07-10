@@ -9,6 +9,7 @@ a personal machine:
 * ``GET  /``               – single-page dashboard (submit goals, watch runs);
 * ``GET  /api/status``     – backends, mode, roles, governor spend;
 * ``POST /api/goals``      – ``{"goal": "..."}`` → queue a run, returns its id;
+* ``POST /api/runs/<id>/cancel`` – cancel a queued run / stop the running one;
 * ``GET  /api/runs``       – all runs (newest first, summaries);
 * ``GET  /api/runs/<id>``  – one run incl. its live Task Ledger document.
 
@@ -44,7 +45,7 @@ class Run:
 
     run_id: str
     goal: str
-    status: str = "queued"           # queued | running | completed | failed
+    status: str = "queued"           # queued | running | completed | failed | cancelled
     conclusion: str = ""
     error: str = ""
     ledger_id: str = ""
@@ -101,6 +102,22 @@ class RunManager:
         data["ledger"] = self._read_ledger(data.get("ledger_id", ""))
         return data
 
+    def cancel(self, run_id: str) -> bool:
+        """Cancel a queued run, or cooperatively stop the running one."""
+        with self._lock:
+            run = self._runs.get(run_id)
+            if run is None:
+                return False
+            if run.status == "queued":
+                run.status = "cancelled"
+                run.finished_at = _utcnow()
+                return True
+            running = run.status == "running"
+        if running and self._runtime is not None:
+            self._runtime.orchestrator.request_cancel()
+            return True
+        return False
+
     def event_hub(self):  # noqa: ANN201 – EventHub or None
         """The live event hub of the running swarm (None before first goal)."""
         return self._runtime.events if self._runtime is not None else None
@@ -119,6 +136,7 @@ class RunManager:
                 "workflow": runtime.workflow.name,
                 "roles": sorted(w.role for w in runtime.workers),
                 "tokens_last_hour": runtime.governor.window_total,
+                "posture": runtime.governor.posture().posture.name,
             })
         return info
 
@@ -165,6 +183,8 @@ class RunManager:
                 continue
             with self._lock:
                 run = self._runs[run_id]
+                if run.status == "cancelled":  # cancelled while still queued
+                    continue
                 run.status = "running"
             try:
                 runtime = self._ensure_runtime()
@@ -175,8 +195,9 @@ class RunManager:
                 )
                 watcher.start()
                 conclusion = runtime.run(run.goal)
+                cancelled = runtime.orchestrator.was_cancelled()
                 with self._lock:
-                    run.status = "completed"
+                    run.status = "cancelled" if cancelled else "completed"
                     run.conclusion = conclusion
                     # Fast runs can finish before the watcher fires; runs are
                     # serial, so the orchestrator's last ledger is this run's.
@@ -275,6 +296,12 @@ class _Handler(BaseHTTPRequestHandler):
         self.wfile.write(f"event: {event.kind}\ndata: {payload}\n\n".encode("utf-8"))
 
     def do_POST(self) -> None:  # noqa: N802 – http.server API
+        if self.path.startswith("/api/runs/") and self.path.endswith("/cancel"):
+            run_id = self.path[len("/api/runs/"):-len("/cancel")]
+            ok = self.manager.cancel(run_id)
+            self._send_json(200 if ok else 404,
+                            {"cancelled": ok, "run_id": run_id})
+            return
         if self.path != "/api/goals":
             self._send_json(404, {"error": "not found"})
             return
@@ -341,106 +368,212 @@ def serve_forever(
 # Dashboard page (inline: the server must stay dependency- and asset-free)
 # ---------------------------------------------------------------------------
 
-DASHBOARD_HTML = """<!DOCTYPE html>
+DASHBOARD_HTML = r"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Mythos Control Panel</title>
 <style>
-:root{--bg:#0d1117;--panel:#161b22;--line:#30363d;--text:#e6edf3;--dim:#8b949e;
---accent:#58a6ff;--ok:#3fb950;--bad:#f85149;--run:#d29922}
-*{box-sizing:border-box}body{margin:0;font:14px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;
-background:var(--bg);color:var(--text)}
-header{padding:16px 24px;border-bottom:1px solid var(--line);display:flex;gap:16px;align-items:baseline}
-h1{font-size:18px;margin:0}#status{color:var(--dim);font-size:12px}
-main{max-width:980px;margin:0 auto;padding:24px;display:grid;gap:16px}
-.panel{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:16px}
-form{display:flex;gap:8px}input[type=text]{flex:1;background:var(--bg);border:1px solid var(--line);
-border-radius:6px;color:var(--text);padding:10px;font:inherit}
-button{background:var(--accent);color:#0d1117;border:0;border-radius:6px;padding:10px 18px;
-font:inherit;font-weight:700;cursor:pointer}
-.run{border-top:1px solid var(--line);padding:10px 0;cursor:pointer}
-.run:first-child{border-top:0}
-.badge{display:inline-block;min-width:86px;text-align:center;border-radius:12px;padding:1px 10px;
-font-size:12px;font-weight:700}
-.queued{background:#30363d}.running{background:var(--run);color:#0d1117}
-.completed{background:var(--ok);color:#0d1117}.failed{background:var(--bad);color:#0d1117}
-.goal{margin-left:10px}.dim{color:var(--dim);font-size:12px}
-#detail pre{white-space:pre-wrap;word-break:break-word;background:var(--bg);
-border:1px solid var(--line);border-radius:6px;padding:12px;max-height:340px;overflow:auto}
-.step{display:flex;gap:10px;padding:4px 0;align-items:baseline}
-.step .badge{min-width:86px}
+:root{
+  --bg:#070b12; --bg2:#0b1220; --panel:rgba(18,26,42,.72); --panel2:rgba(22,32,52,.55);
+  --line:rgba(120,160,220,.16); --text:#e8f1ff; --dim:#8aa0c2; --accent:#38e0ff; --accent2:#7c5cff;
+  --ok:#37e39b; --bad:#ff5c6c; --run:#ffbe4d; --warn:#ff8a3d;
+  --glow:0 0 0 1px rgba(56,224,255,.16), 0 8px 40px rgba(8,16,32,.55);
+  --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{font:14px/1.55 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:var(--text);
+  background:radial-gradient(1200px 600px at 82% -10%,rgba(124,92,255,.16),transparent 60%),
+    radial-gradient(900px 500px at 0% 0%,rgba(56,224,255,.11),transparent 55%),
+    linear-gradient(180deg,var(--bg),var(--bg2));background-attachment:fixed;
+  display:flex;flex-direction:column}
+.mono{font-family:var(--mono)}
+header{position:sticky;top:0;z-index:5;backdrop-filter:blur(12px);padding:12px 20px;
+  border-bottom:1px solid var(--line);display:flex;gap:16px;align-items:center;flex-wrap:wrap;
+  background:linear-gradient(180deg,rgba(8,14,24,.85),rgba(8,14,24,.5))}
+.brand{display:flex;align-items:center;gap:11px;font-weight:800;letter-spacing:.5px;font-size:16px}
+.reactor{width:24px;height:24px;border-radius:50%;flex:0 0 auto;
+  background:radial-gradient(circle at 50% 50%,#eafcff 0 18%,var(--accent) 22% 40%,transparent 46%);
+  box-shadow:0 0 14px var(--accent),0 0 26px rgba(56,224,255,.5);animation:pulse 3.2s ease-in-out infinite}
+.brand small{color:var(--dim);font-weight:600;letter-spacing:3px;font-size:9.5px;display:block;margin-top:-3px}
+@keyframes pulse{0%,100%{opacity:.82;transform:scale(1)}50%{opacity:1;transform:scale(1.08)}}
+#statusbar{display:flex;gap:7px;align-items:center;flex-wrap:wrap;margin-left:auto}
+.chip{font-size:11px;font-weight:700;color:var(--dim);border:1px solid var(--line);border-radius:999px;
+  padding:3px 10px;background:rgba(120,160,220,.06);white-space:nowrap}
+.chip b{color:var(--text)}
+.pill{font-size:11px;font-weight:800;border-radius:999px;padding:3px 11px;letter-spacing:.4px}
+.p-NORMAL{background:rgba(55,227,155,.16);color:var(--ok);border:1px solid rgba(55,227,155,.4)}
+.p-REDUCED{background:rgba(255,190,77,.16);color:var(--run);border:1px solid rgba(255,190,77,.4)}
+.p-PAUSED{background:rgba(255,138,61,.16);color:var(--warn);border:1px solid rgba(255,138,61,.4)}
+.p-HALT{background:rgba(255,92,108,.18);color:var(--bad);border:1px solid rgba(255,92,108,.5)}
+main{flex:1;display:grid;grid-template-columns:1fr 340px;gap:16px;max-width:1200px;width:100%;
+  margin:0 auto;padding:16px 20px 20px;min-height:0}
+@media(max-width:820px){main{grid-template-columns:1fr}}
+.col{display:flex;flex-direction:column;gap:14px;min-height:0}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;box-shadow:var(--glow);
+  backdrop-filter:blur(6px);display:flex;flex-direction:column;min-height:0}
+.label{font-size:11px;letter-spacing:2.5px;color:var(--dim);font-weight:700;padding:14px 16px 0}
+/* conversation */
+#chatPanel{flex:1;min-height:340px}
+#transcript{flex:1;overflow:auto;padding:14px 16px;display:flex;flex-direction:column;gap:14px}
+.turn{display:flex;gap:10px;max-width:92%}
+.turn.user{align-self:flex-end;flex-direction:row-reverse}
+.av{width:26px;height:26px;border-radius:8px;flex:0 0 auto;display:grid;place-items:center;
+  font-size:12px;font-weight:800}
+.turn.user .av{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#06121a}
+.turn.bot .av{background:rgba(124,92,255,.18);color:var(--accent2);border:1px solid rgba(124,92,255,.4)}
+.bubble{background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:10px 13px;
+  white-space:pre-wrap;word-break:break-word}
+.turn.user .bubble{background:rgba(56,224,255,.09);border-color:rgba(56,224,255,.3)}
+.steps{display:flex;flex-direction:column;gap:3px;margin-top:8px;font-family:var(--mono);font-size:11.5px}
+.stp{display:flex;gap:7px;align-items:baseline;color:var(--dim)}
+.stp b{color:var(--text);font-weight:600}
+.thinking{display:inline-flex;gap:4px;align-items:center;color:var(--dim);font-family:var(--mono);font-size:12px}
+.thinking i{width:6px;height:6px;border-radius:50%;background:var(--accent);display:inline-block;
+  animation:blink 1.2s infinite}.thinking i:nth-child(2){animation-delay:.2s}.thinking i:nth-child(3){animation-delay:.4s}
+@keyframes blink{0%,80%,100%{opacity:.25}40%{opacity:1}}
+.cancel{align-self:flex-start;margin-top:8px;background:rgba(255,92,108,.14);color:var(--bad);
+  border:1px solid rgba(255,92,108,.4);border-radius:8px;padding:5px 12px;font:inherit;font-size:12px;
+  font-weight:700;cursor:pointer}
+.empty{color:var(--dim);font-style:italic;padding:8px 2px;text-align:center}
+form{display:flex;gap:10px;padding:12px 14px;border-top:1px solid var(--line)}
+input[type=text]{flex:1;background:rgba(6,11,18,.7);border:1px solid var(--line);border-radius:10px;
+  color:var(--text);padding:12px 14px;font:inherit;outline:none;transition:.15s}
+input[type=text]:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(56,224,255,.15)}
+button.send{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#06121a;border:0;
+  border-radius:10px;padding:12px 20px;font:inherit;font-weight:800;cursor:pointer;letter-spacing:.3px}
+button.send:hover{filter:brightness(1.08)}
+/* activity rail */
+#activity{max-height:300px;overflow:auto;padding:8px 14px 14px;font-family:var(--mono);font-size:12px;line-height:1.7}
+.ev{display:flex;gap:8px;align-items:baseline;opacity:0;animation:in .25s forwards}
+@keyframes in{to{opacity:1}}
+.ev .t{color:var(--dim);font-size:10.5px;width:60px;flex:0 0 auto}.ev .ico{width:14px;text-align:center;font-weight:800}
+.ev-goalstarted .ico{color:var(--accent)}.ev-taskdispatched .ico{color:var(--run)}
+.ev-taskvalidated .ico,.ev-goalcompleted .ico{color:var(--ok)}
+.ev-taskfailed .ico,.ev-goalfailed .ico,.ev-goalcancelled .ico{color:var(--bad)}
+#runs{overflow:auto;max-height:230px;padding:6px 12px 12px}
+.run{display:flex;gap:9px;align-items:center;border-radius:9px;padding:8px 10px;cursor:pointer;border:1px solid transparent}
+.run:hover{background:rgba(120,160,220,.07);border-color:var(--line)}
+.badge{display:inline-flex;align-items:center;justify-content:center;min-width:74px;border-radius:999px;
+  padding:2px 9px;font-size:10.5px;font-weight:800}
+.queued,.pending{background:rgba(120,160,220,.16);color:var(--dim)}
+.running,.dispatched{background:rgba(255,190,77,.18);color:var(--run)}
+.completed,.validated{background:rgba(55,227,155,.18);color:var(--ok)}
+.failed{background:rgba(255,92,108,.18);color:var(--bad)}
+.cancelled{background:rgba(255,138,61,.18);color:var(--warn)}
+.rgoal{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dim{color:var(--dim)}.tiny{font-size:11px}
+@media(prefers-reduced-motion:reduce){.reactor,.thinking i{animation:none}}
 </style></head><body>
-<header><h1>&#9889; Mythos Control Panel</h1><div id="status">connecting…</div></header>
+<header>
+  <div class="brand"><span class="reactor"></span><span>MYTHOS<small>BOSS&nbsp;CONSOLE</small></span></div>
+  <div id="statusbar"><span class="chip dim">connecting…</span></div>
+</header>
 <main>
-<div class="panel">
-  <form id="f"><input type="text" id="goal" placeholder="Give the swarm a goal…" autocomplete="off">
-  <button>Run</button></form>
-</div>
-<div class="panel"><div class="dim">RUNS</div><div id="runs">none yet</div></div>
-<div class="panel" id="detail" hidden><div class="dim">RUN DETAIL</div><div id="detailBody"></div></div>
-<div class="panel"><div class="dim">LIVE EVENT STREAM (SSE)</div><div id="events" class="dim">waiting for events…</div></div>
+  <div class="col">
+    <div class="panel" id="chatPanel">
+      <div class="label">CONVERSATION</div>
+      <div id="transcript"><div class="empty">Tell the swarm what you need. It plans, delegates to specialist agents, verifies, and reports back here.</div></div>
+      <form id="f"><input type="text" id="goal" placeholder="Ask Mythos to do something…" autocomplete="off">
+      <button class="send">Send</button></form>
+    </div>
+  </div>
+  <div class="col">
+    <div class="panel"><div class="label">LIVE ACTIVITY · SSE</div>
+      <div id="activity"><div class="empty">awaiting events…</div></div></div>
+    <div class="panel"><div class="label">RUNS</div>
+      <div id="runs"><div class="empty">no runs yet</div></div></div>
+  </div>
 </main>
 <script>
-let selected=null;
 const $=id=>document.getElementById(id);
+const esc=t=>{const d=document.createElement('div');d.textContent=t==null?'':t;return d.innerHTML};
+const clk=s=>({validated:'completed',failed:'failed',dispatched:'running',pending:'queued'})[s]||'queued';
 async function jget(u){const r=await fetch(u);return r.json()}
+let chat=[];           // {role, text, runId?, status?, steps?}
+function botLive(){for(let i=chat.length-1;i>=0;i--){if(chat[i].role==='bot'&&chat[i].status==='running')return chat[i]}return null}
+function render(){
+  const t=$('transcript');
+  if(!chat.length){t.innerHTML='<div class="empty">Tell the swarm what you need. It plans, delegates to specialist agents, verifies, and reports back here.</div>';return}
+  t.innerHTML=chat.map(m=>{
+    const av=m.role==='user'?'<div class="av">You</div>':'<div class="av">◈</div>';
+    let inner='';
+    if(m.role==='user'){inner=`<div class="bubble">${esc(m.text)}</div>`}
+    else{
+      let body='';
+      if(m.status==='running'){
+        const steps=(m.steps||[]).map(s=>`<div class="stp"><span>${s.ico}</span><b>${esc(s.role||'')}</b> ${esc(s.label)}</div>`).join('');
+        body=`<div class="thinking"><i></i><i></i><i></i>&nbsp;working…</div>`+(steps?`<div class="steps">${steps}</div>`:'')
+          +(m.runId?`<button class="cancel" onclick="cancelRun('${m.runId}')">Stop</button>`:'');
+      }else{body=`<div class="bubble">${esc(m.text||'(no output)')}</div>`}
+      inner=body;
+    }
+    return `<div class="turn ${m.role==='user'?'user':'bot'}">${av}<div>${inner}</div></div>`;
+  }).join('');
+  t.scrollTop=t.scrollHeight;
+}
+function statusBar(s){
+  if(!s.started)return '<span class="chip dim">swarm idle · starts on first message</span>';
+  const p=s.posture||'NORMAL';
+  return `<span class="pill p-${esc(p)}">${esc(p)}</span>`
+    +`<span class="chip">bus <b>${esc(s.bus)}</b></span>`
+    +`<span class="chip">matrix <b>${esc(s.matrix)}</b></span>`
+    +`<span class="chip">${s.dynamic?'<b>dynamic</b>':'wf <b>'+esc(s.workflow)+'</b>'}</span>`
+    +`<span class="chip">tok/h <b>${s.tokens_last_hour??0}</b></span>`
+    +(s.roles||[]).map(r=>'<span class="chip">'+esc(r)+'</span>').join('');
+}
 async function refresh(){
   try{
-    const s=await jget('/api/status');
-    $('status').textContent=s.started
-      ?`bus=${s.bus} · matrix=${s.matrix} · ${s.dynamic?'dynamic':'workflow: '+s.workflow} · roles: ${(s.roles||[]).join(', ')} · tokens/h: ${s.tokens_last_hour}`
-      :'swarm idle (starts on first goal)';
+    const s=await jget('/api/status');$('statusbar').innerHTML=statusBar(s);
     const d=await jget('/api/runs');
     $('runs').innerHTML=d.runs.length?d.runs.map(r=>
-      `<div class="run" onclick="select('${r.run_id}')">
-        <span class="badge ${r.status}">${r.status}</span>
-        <span class="goal">${esc(r.goal)}</span>
-        <span class="dim"> ${r.run_id} · ${r.submitted_at||''}</span></div>`).join(''):'none yet';
-    if(selected)showDetail(await jget('/api/runs/'+selected));
-  }catch(e){$('status').textContent='dashboard error: '+e}
-}
-function esc(t){const d=document.createElement('div');d.textContent=t;return d.innerHTML}
-window.select=async id=>{selected=id;$('detail').hidden=false;
-  showDetail(await jget('/api/runs/'+id))}
-function showDetail(r){
-  let h=`<p><span class="badge ${r.status}">${r.status}</span>
-    <span class="goal">${esc(r.goal)}</span></p>`;
-  if(r.ledger&&r.ledger.steps){h+=r.ledger.steps.map(s=>
-    `<div class="step"><span class="badge ${
-       {validated:'completed',failed:'failed',dispatched:'running',pending:'queued'}[s.status]||'queued'
-     }">${s.status}</span><span>[${esc(s.role)}] ${esc(s.objective)}</span>
-     <span class="dim">${s.attempts?('attempts: '+s.attempts):''}</span></div>`).join('')}
-  if(r.conclusion)h+=`<pre>${esc(r.conclusion)}</pre>`;
-  if(r.error)h+=`<pre>${esc(r.error)}</pre>`;
-  $('detailBody').innerHTML=h;
+      `<div class="run"><span class="badge ${r.status}">${r.status}</span>
+        <span class="rgoal">${esc(r.goal)}</span>
+        <span class="dim tiny">${(r.submitted_at||'').slice(11,19)}</span></div>`).join('')
+      :'<div class="empty">no runs yet</div>';
+    // resolve any finished bot turn
+    const live=botLive();
+    if(live&&live.runId){
+      const run=await jget('/api/runs/'+live.runId);
+      if(run&&run.status&&run.status!=='running'&&run.status!=='queued'){
+        live.status=run.status;
+        live.text=run.conclusion||run.error||'(no output)';
+        render();
+      }
+    }
+  }catch(e){$('statusbar').innerHTML='<span class="chip" style="color:var(--bad)">error: '+esc(e)+'</span>'}
 }
 $('f').addEventListener('submit',async e=>{
-  e.preventDefault();
-  const goal=$('goal').value.trim();if(!goal)return;
-  $('goal').value='';
-  const r=await fetch('/api/goals',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({goal})});
-  const run=await r.json();if(run.run_id)select(run.run_id);
-  refresh();
+  e.preventDefault();const goal=$('goal').value.trim();if(!goal)return;$('goal').value='';
+  chat.push({role:'user',text:goal});
+  const bot={role:'bot',status:'running',steps:[],runId:null,text:''};chat.push(bot);render();
+  try{
+    const r=await fetch('/api/goals',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({goal})});
+    const run=await r.json();bot.runId=run.run_id;render();refresh();
+  }catch(err){bot.status='failed';bot.text='Could not reach the swarm: '+err;render()}
 });
-// Real-time push: the SSE stream drives instant refreshes (no waiting for
-// the poll tick) and renders a live event log.
-const evLog=[];
-function connectSSE(){
-  const src=new EventSource('/api/events');
-  src.onmessage=e=>onEvent(JSON.parse(e.data));
-  ['goal.started','task.dispatched','task.validated','task.failed','goal.completed','goal.failed']
-    .forEach(k=>src.addEventListener(k,e=>onEvent(JSON.parse(e.data))));
-  src.onerror=()=>{/* EventSource auto-reconnects */};
-}
+window.cancelRun=async id=>{await fetch('/api/runs/'+id+'/cancel',{method:'POST'});refresh()};
+const ICON={'goal.started':'▶','task.dispatched':'→','task.validated':'✓','task.failed':'✗',
+  'goal.completed':'★','goal.failed':'✗','goal.cancelled':'⊘'};
+let evEmpty=true;
 function onEvent(ev){
-  const icon={'goal.started':'▶','task.dispatched':'→','task.validated':'✓',
-    'task.failed':'✗','goal.completed':'★','goal.failed':'✗'}[ev.kind]||'·';
-  const line=`${icon} ${ev.kind}${ev.role?(' ['+ev.role+']'):''}${ev.step!=null?(' #'+ev.step):''}`;
-  evLog.unshift(line);if(evLog.length>40)evLog.pop();
-  $('events').innerHTML=evLog.map(esc).join('<br>');
-  refresh(); // push-triggered refresh = immediate, not on the 1.5s tick
+  if(evEmpty){$('activity').innerHTML='';evEmpty=false}
+  const cls='ev-'+(ev.kind||'').replace(/\./g,'');
+  const row=document.createElement('div');row.className='ev '+cls;
+  row.innerHTML=`<span class="t">${new Date().toTimeString().slice(0,8)}</span>`
+    +`<span class="ico">${ICON[ev.kind]||'·'}</span>`
+    +`<span>${esc(ev.kind)}${ev.role?(' ['+esc(ev.role)+']'):''}</span>`;
+  const c=$('activity');c.insertBefore(row,c.firstChild);while(c.children.length>60)c.removeChild(c.lastChild);
+  const live=botLive();
+  if(live&&(ev.kind||'').startsWith('task.')){
+    live.steps.push({ico:ICON[ev.kind]||'·',role:ev.role,label:ev.kind.replace('task.','')});
+    render();
+  }
+  refresh();
 }
-connectSSE();refresh();setInterval(refresh,2500);
-</script></body></html>
-"""
+(function sse(){const src=new EventSource('/api/events');
+  src.onmessage=e=>onEvent(JSON.parse(e.data));
+  Object.keys(ICON).forEach(k=>src.addEventListener(k,e=>onEvent(JSON.parse(e.data))));
+  src.onerror=()=>{};})();
+render();refresh();setInterval(refresh,2200);
+</script></body></html>"""

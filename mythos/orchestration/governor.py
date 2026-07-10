@@ -74,6 +74,30 @@ class CostGovernor:
                 )
         return None
 
+    def posture(self, consecutive_failures: int = 0, max_consecutive_failures: int = 5):
+        """
+        Graded health posture derived from the same budgets ``check()`` uses.
+
+        Turns the boolean breaker into a NORMAL/REDUCED/PAUSED/HALT ladder: the
+        orchestrator can throttle (REDUCED) or stop dispatching (PAUSED/HALT)
+        before the hard trip, and the control panel can surface it.
+        """
+        from .posture import PostureInputs, evaluate_posture  # noqa: PLC0415
+
+        with self._lock:
+            self._prune(time.monotonic())
+            fractions = []
+            if self.hourly_token_budget > 0:
+                fractions.append(self._window_total / self.hourly_token_budget)
+            if self.run_token_budget > 0:
+                fractions.append(self._run_total / self.run_token_budget)
+            budget_fraction = max(fractions) if fractions else 0.0
+        return evaluate_posture(PostureInputs(
+            budget_fraction=budget_fraction,
+            consecutive_failures=consecutive_failures,
+            max_consecutive_failures=max_consecutive_failures,
+        ))
+
     @property
     def window_total(self) -> int:
         with self._lock:

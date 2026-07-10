@@ -36,7 +36,7 @@ def parse_args() -> argparse.Namespace:
             Environment variables:
               ANTHROPIC_API_KEY       Anthropic API key (used by the default Claude backend)
               MYTHOS_API_KEY          Override API key for any LLM provider
-              MYTHOS_LLM_PROVIDER     LLM provider (anthropic | openai | stub)  [default: anthropic]
+              MYTHOS_LLM_PROVIDER     LLM provider (anthropic | openai | local | stub)  [default: anthropic]
               MYTHOS_LLM_MODEL        Model name  [default: claude-opus-4-5]
               MYTHOS_LLM_TEMPERATURE  Sampling temperature (0.0 – 1.0)
               MYTHOS_MAX_ITERATIONS   Hard iteration cap (default: 50)
@@ -52,8 +52,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--provider",
         default=None,
-        choices=["openai", "anthropic", "stub"],
-        help="LLM provider to use (overrides MYTHOS_LLM_PROVIDER).",
+        choices=["openai", "anthropic", "local", "ollama", "stub"],
+        help=(
+            "LLM provider to use (overrides MYTHOS_LLM_PROVIDER). "
+            "'local'/'ollama' target any OpenAI-compatible endpoint "
+            "(MYTHOS_LOCAL_URL, default Ollama on localhost:11434)."
+        ),
     )
     parser.add_argument(
         "--model",
@@ -121,6 +125,22 @@ def parse_args() -> argparse.Namespace:
         ),
     )
 
+    persona_group = parser.add_argument_group("persona library")
+    persona_group.add_argument(
+        "--persona",
+        metavar="NAME",
+        default=None,
+        help=(
+            "Adopt a specialist persona from the library (e.g. "
+            "engineering-backend-architect) for a single-agent run."
+        ),
+    )
+    persona_group.add_argument(
+        "--list-personas",
+        action="store_true",
+        help="List the available specialist personas and exit.",
+    )
+
     kb_group = parser.add_argument_group("knowledge base")
     kb_group.add_argument(
         "--ingest",
@@ -143,6 +163,16 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Navigate the Data Matrix for NEED and print the fused context "
             "(pair with --ingest to ingest-then-query in one run), then exit."
+        ),
+    )
+
+    parser.add_argument(
+        "--schedule",
+        metavar="FILE",
+        default=None,
+        help=(
+            "Run the proactive scheduler daemon: fire the goals in a routines "
+            "JSON file (interval/daily-at) through the swarm until interrupted."
         ),
     )
 
@@ -197,6 +227,19 @@ def build_config(args: argparse.Namespace) -> MythosConfig:
         config.verbose = False
     elif args.verbose:
         config.verbose = True
+
+    if getattr(args, "persona", None):
+        from mythos.orchestration.personas import get_library_persona  # noqa: PLC0415
+
+        persona = get_library_persona(args.persona)
+        if persona is None:
+            from mythos.orchestration.personas import list_library  # noqa: PLC0415
+
+            raise SystemExit(
+                f"error: unknown persona '{args.persona}'. "
+                f"Run --list-personas to see the {len(list_library())} available."
+            )
+        config.system_suffix = persona.compile_system_suffix()
 
     return config
 
@@ -286,6 +329,50 @@ def run_swarm(args: argparse.Namespace, config: MythosConfig) -> int:
         runtime.shutdown()
 
 
+def run_schedule(args: argparse.Namespace, config: MythosConfig) -> int:
+    """Run the proactive scheduler: fire routine goals through the swarm."""
+    import time  # noqa: PLC0415
+
+    from mythos.orchestration.runtime import SwarmRuntime  # noqa: PLC0415
+    from mythos.orchestration.scheduler import Scheduler, load_routines  # noqa: PLC0415
+    from mythos.orchestration.workflows import get_workflow  # noqa: PLC0415
+
+    routines = load_routines(args.schedule)
+    if not routines:
+        print(f"error: no routines loaded from '{args.schedule}'", file=sys.stderr)
+        return 1
+
+    orch_config = _build_orch_config(args, config)
+    try:
+        workflow = get_workflow(args.workflow)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    runtime = SwarmRuntime(config=orch_config, agent_config=config, workflow=workflow)
+
+    def fire(routine) -> None:
+        print(f"[scheduler] firing '{routine.id}': {routine.goal}")
+        try:
+            print(runtime.run(routine.goal))
+        except Exception as exc:  # noqa: BLE001 – one routine failure never stops the daemon
+            print(f"[scheduler] routine '{routine.id}' failed: {exc}", file=sys.stderr)
+
+    scheduler = Scheduler(fire=fire)
+    for routine in routines:
+        scheduler.add(routine)
+    scheduler.start()
+    print(f"Mythos scheduler running {len(routines)} routine(s). Ctrl-C to stop.")
+    try:
+        while True:
+            time.sleep(3600)
+    except KeyboardInterrupt:
+        print("\nStopping scheduler.")
+    finally:
+        scheduler.stop()
+        runtime.shutdown()
+    return 0
+
+
 def run_knowledge_base(args: argparse.Namespace, config: MythosConfig) -> int:
     """Ingest a taxonomy file and/or query the Data Matrix, then exit.
 
@@ -356,6 +443,16 @@ def main() -> int:
         print(f"Mythos {__version__}")
         return 0
 
+    if args.list_personas:
+        from mythos.orchestration.personas import load_library  # noqa: PLC0415
+
+        library = load_library()
+        print(f"Specialist personas ({len(library)}):\n")
+        for slug, persona in library.items():
+            print(f"  {slug}\n    {persona.mission[:100]}")
+        print("\nUse one with:  python main.py --persona <name> \"your goal\"")
+        return 0
+
     # PC quality-of-life: pick up ~/.mythos/env and ./.env before anything
     # reads the environment (exported variables always win).
     from mythos.envfile import load_default_env_files, write_env_template  # noqa: PLC0415
@@ -383,6 +480,9 @@ def main() -> int:
 
     if args.ingest or args.kb_query:
         return run_knowledge_base(args, config)
+
+    if args.schedule:
+        return run_schedule(args, config)
 
     if args.serve:
         return run_serve(args, config)

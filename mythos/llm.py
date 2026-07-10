@@ -19,6 +19,9 @@ unsupported role or without the id that links them to the originating call.
 from __future__ import annotations
 
 import json
+import os
+import urllib.error
+import urllib.request
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
 
@@ -255,6 +258,105 @@ class AnthropicLLM(BaseLLM):
 
 
 # ---------------------------------------------------------------------------
+# Local / free provider (OpenAI-compatible, dependency-free)
+# ---------------------------------------------------------------------------
+
+class LocalLLM(BaseLLM):
+    """
+    Local / free-model provider over any OpenAI-compatible chat endpoint.
+
+    Pure ``urllib`` — no SDK dependency — so Mythos can run entirely on a
+    local model (Ollama, LM Studio, llama.cpp, vLLM) or a free hosted gateway
+    (Groq, Together, OpenRouter) by pointing at its ``/v1`` base URL.  The
+    default targets Ollama's OpenAI-compatible server on ``localhost:11434``.
+
+    Configuration (env, read here so ``MythosConfig`` stays provider-neutral):
+      * ``MYTHOS_LOCAL_URL``     base URL incl. ``/v1`` (default Ollama).
+      * ``MYTHOS_LOCAL_API_KEY`` bearer token; most local servers ignore it
+        (default ``"local"``), hosted gateways require their key.
+
+    The wire format is identical to :class:`OpenAILLM`, so the same message and
+    tool-spec translation is reused.  Models that don't support tool-calling
+    simply return plain content — the executor's plain-text nudge handles that.
+    """
+
+    def __init__(
+        self,
+        model: str,
+        api_key: Optional[str] = None,
+        base_url: Optional[str] = None,
+    ) -> None:
+        base = (base_url or os.getenv("MYTHOS_LOCAL_URL", "http://localhost:11434/v1"))
+        self._url = base.rstrip("/") + "/chat/completions"
+        self._model = model
+        self._api_key = api_key or os.getenv("MYTHOS_LOCAL_API_KEY", "local")
+        # A malformed timeout env var is a config typo, not a reason to refuse
+        # to start — fall back to the default rather than raising.
+        try:
+            self._timeout = max(1, int(os.getenv("MYTHOS_LOCAL_TIMEOUT_S", "120")))
+        except ValueError:
+            self._timeout = 120
+
+    def chat(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]] = None,
+        temperature: float = 0.2,
+        max_tokens: int = 4096,
+    ) -> LLMResponse:
+        payload: Dict[str, Any] = {
+            "model": self._model,
+            "messages": _to_openai_messages(messages),
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "stream": False,
+        }
+        if tools:
+            payload["tools"] = tools
+            payload["tool_choice"] = "auto"
+            # Match OpenAILLM: one tool call per turn so nothing is silently
+            # dropped (we only consume tool_calls[0]). Harmless if the backend
+            # ignores the flag.
+            payload["parallel_tool_calls"] = False
+
+        request = urllib.request.Request(
+            self._url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self._api_key}",
+            },
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self._timeout) as response:
+                body = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            detail = exc.read(2000).decode("utf-8", errors="replace")
+            raise RuntimeError(f"Local LLM HTTP {exc.code}: {detail}") from exc
+        except urllib.error.URLError as exc:
+            # Surface as a connection error so RetryingLLM treats it transient.
+            raise RuntimeError(f"Local LLM connection failed: {exc.reason}") from exc
+
+        choice = (body.get("choices") or [{}])[0]
+        msg = choice.get("message") or {}
+        usage = _local_usage(body.get("usage"))
+
+        tool_calls = msg.get("tool_calls") or []
+        if tool_calls:
+            call = tool_calls[0]
+            fn = call.get("function") or {}
+            return LLMResponse(
+                content=msg.get("content"),
+                tool_name=fn.get("name"),
+                tool_args=_safe_json_args(fn.get("arguments")),
+                tool_call_id=call.get("id"),
+                raw=body,
+                usage=usage,
+            )
+        return LLMResponse(content=msg.get("content") or "", raw=body, usage=usage)
+
+
+# ---------------------------------------------------------------------------
 # Stub provider (offline / testing)
 # ---------------------------------------------------------------------------
 
@@ -380,6 +482,18 @@ def _openai_usage(response: Any) -> Dict[str, int]:
     return {
         "input": int(getattr(usage, "prompt_tokens", 0) or 0),
         "output": int(getattr(usage, "completion_tokens", 0) or 0),
+        "cache_read": 0,
+        "cache_creation": 0,
+    }
+
+
+def _local_usage(usage: Any) -> Dict[str, int]:
+    """Normalise a JSON usage block from an OpenAI-compatible local server."""
+    if not isinstance(usage, dict):
+        return {}
+    return {
+        "input": int(usage.get("prompt_tokens", 0) or 0),
+        "output": int(usage.get("completion_tokens", 0) or 0),
         "cache_read": 0,
         "cache_creation": 0,
     }
@@ -513,6 +627,11 @@ def create_llm(provider: str, model: str, api_key: Optional[str]) -> BaseLLM:
         return OpenAILLM(model=model, api_key=api_key)
     if provider in ("anthropic", "claude"):
         return AnthropicLLM(model=model, api_key=api_key)
+    if provider in ("local", "ollama"):
+        return LocalLLM(model=model, api_key=api_key)
     if provider == "stub":
         return StubLLM()
-    raise ValueError(f"Unknown LLM provider: '{provider}'. Choose 'openai', 'anthropic', or 'stub'.")
+    raise ValueError(
+        f"Unknown LLM provider: '{provider}'. "
+        "Choose 'anthropic', 'openai', 'local' (OpenAI-compatible / Ollama), or 'stub'."
+    )
