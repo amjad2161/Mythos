@@ -530,6 +530,7 @@ def build_default_registry() -> ToolRegistry:
     # lazily here to keep module import order acyclic.
     from .tools_asr import ASR_TOOLS  # noqa: PLC0415
     from .tools_assistant import ASSISTANT_TOOLS  # noqa: PLC0415
+    from .tools_browser import BROWSER_TOOLS  # noqa: PLC0415
     from .tools_computer import COMPUTER_TOOLS  # noqa: PLC0415
     from .tools_geo import GEO_TOOLS  # noqa: PLC0415
     from .tools_tts import TTS_TOOLS  # noqa: PLC0415
@@ -542,6 +543,7 @@ def build_default_registry() -> ToolRegistry:
         *ASR_TOOLS,
         *ASSISTANT_TOOLS,
         *COMPUTER_TOOLS,
+        *BROWSER_TOOLS,
     ):
         registry.register(tool)
 

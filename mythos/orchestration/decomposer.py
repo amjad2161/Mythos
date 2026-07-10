@@ -53,6 +53,10 @@ ROLE_KEYWORDS: Dict[str, Tuple[str, ...]] = {
         "open", "clipboard", "copy to", "screenshot", "notify",
         "desktop", "launch", "click",
     ),
+    "browser": (
+        "browse", "website", "web page", "navigate to", "fill the form",
+        "log in to", "click the", "on the site", "sign in",
+    ),
 }
 
 _ROLE_DESCRIPTIONS: Dict[str, str] = {
@@ -63,6 +67,7 @@ _ROLE_DESCRIPTIONS: Dict[str, str] = {
     "voice": "turns text into spoken audio files via the TTS service",
     "assistant": "digital secretary: tasks, notes, reminders, e-mail drafts, daily briefings",
     "operator": "computer use: open URLs/files, clipboard, notifications, screenshots",
+    "browser": "web use: navigate sites, read indexed page elements, click, fill forms (no shell)",
 }
 
 _DECOMPOSER_SYSTEM = """\

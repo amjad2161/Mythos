@@ -157,6 +157,7 @@ Specialised roles and their services:
 | `voice` | `speak` → OpenAI-compatible TTS sidecar | `MYTHOS_TTS_URL` (e.g. `docker compose --profile voice up` — supertonic: MIT code, OpenRAIL-M model weights) |
 | `assistant` | digital secretary: `pa_add_task/list_tasks/complete_task`, `pa_add_note/list_notes`, `pa_set_reminder/due_reminders`, `pa_draft_email`, `pa_daily_brief` | local JSON store (`MYTHOS_ASSISTANT_DIR`, default `~/.mythos/assistant`) — offline |
 | `operator` | computer use: `open_url`, `open_path`, `clipboard_get/set`, `notify`, `screenshot` (no shell) | OS backends where present (xdg-open, xclip/wl-clip, notify-send, mss/scrot); degrades gracefully |
+| `browser` | web use: `browser_navigate`, `browser_read_page` (indexed DOM), `browser_click`, `browser_fill`, `browser_screenshot` (no shell) | Playwright + Chromium (`pip install playwright && playwright install chromium`); degrades to read-only `web_fetch` when absent |
 
 Every role carries a Markdown **persona** (override with `MYTHOS_PERSONA_DIR`);
 token spend is metered for real (`LLMResponse.usage` → Monitor budgets +

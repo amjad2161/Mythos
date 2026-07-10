@@ -93,6 +93,21 @@ ROLE_TOOLS: Dict[str, List[str]] = {
         "think",
         "finish",
     ],
+    # Web use: real browser automation (navigate, indexed-DOM read, click,
+    # fill, screenshot). Untrusted-page input role: NO shell.
+    "browser": [
+        "browser_navigate",
+        "browser_read_page",
+        "browser_click",
+        "browser_fill",
+        "browser_screenshot",
+        "web_fetch",
+        "read_file",
+        "write_file",
+        "current_time",
+        "think",
+        "finish",
+    ],
     # Computer use: control the desktop (open, clipboard, notify, screenshot).
     # Untrusted-screen input role: NO shell, NO file writes beyond screenshots.
     "operator": [
@@ -133,6 +148,9 @@ _MUTATING_TOOLS = frozenset({
     "open_path",
     "clipboard_set",
     "notify",
+    "browser_navigate",
+    "browser_click",
+    "browser_fill",
 })
 
 

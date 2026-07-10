@@ -424,7 +424,7 @@ an outward step (e.g. "email it to finance") would hit the approval gate.
 | Entity/relationship graph memory | designed | §3.3 |
 | **HITL approvals gate** | **built** | `approvals.py` (`MYTHOS_APPROVALS`), gated at `ToolRegistry.call` |
 | Connector adapters (cloud cal/mail) | designed | §4.3 |
-| Browser automation role | designed | §4.2 |
+| **Browser automation role** | **built** | `tools_browser.py`, `browser` role (Playwright + `web_fetch` fallback) |
 | Scheduler + steering + Boss front-end | designed | §2, §4.4 |
 | Full computer perception→action loop | roadmap | §4.1 |
 
