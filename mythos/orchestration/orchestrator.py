@@ -89,6 +89,16 @@ class Orchestrator:
         self._unmatched: Dict[str, StateUpdate] = {}
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        # Steering: a cooperative cancel checked between subtask dispatches, so
+        # a user can stop an in-progress goal from the control panel.
+        self._cancel = threading.Event()
+
+    def request_cancel(self) -> None:
+        """Ask the current run to stop dispatching new subtasks (cooperative)."""
+        self._cancel.set()
+
+    def was_cancelled(self) -> bool:
+        return self._cancel.is_set()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -137,6 +147,7 @@ class Orchestrator:
         # Cleared up front so observers never attribute the previous run's
         # ledger to this goal.
         self.last_ledger_id = None
+        self._cancel.clear()
 
         # Seed the Data Matrix: the system instruction is absolute ground
         # truth (max trust, verbatim); the goal refines it.  The system node
@@ -225,7 +236,11 @@ class Orchestrator:
         deps_by_index = {i: step.depends_on for i, step in enumerate(workflow.steps)}
         in_flight: Dict[str, int] = {}          # payload task_id -> plan task id
         constraints_in_flight: Dict[str, Constraints] = {}
+        cancelled = False
         while True:
+            if self._cancel.is_set():
+                cancelled = True
+                break
             while True:
                 task = plan.next_task()
                 if task is None:
@@ -290,6 +305,13 @@ class Orchestrator:
                     role=step.role, step=step_index, attempts=update.attempt,
                     error=(update.error_log or update.summary)[:300],
                 )
+
+        if cancelled:
+            self._events.emit("goal.cancelled", trace_id=trace_id, ledger_id=ledger_id)
+            done = [results_by_index[i] for i in sorted(results_by_index)]
+            return "Goal cancelled by user." + (
+                " Completed before cancel: " + " | ".join(done) if done else ""
+            )
 
         results = [results_by_index[i] for i in sorted(results_by_index)]
         if plan.has_failures():

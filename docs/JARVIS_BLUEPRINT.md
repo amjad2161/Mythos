@@ -426,8 +426,8 @@ an outward step (e.g. "email it to finance") would hit the approval gate.
 | Connector adapters (cloud cal/mail) | designed | §4.3 |
 | **Browser automation role** | **built** | `tools_browser.py`, `browser` role (Playwright + `web_fetch` fallback) |
 | **Scheduler daemon (routines)** | **built** | `scheduler.py`, `mythos --schedule` |
-| Steering channel + Boss front-end | designed | §2, §3.5 |
-| Full computer perception→action loop | roadmap | §4.1 |
+| **Boss chat console + steering/cancel** | **built** | `server.py` chat UI + `Orchestrator.request_cancel` |
+| **Computer perception→action vocabulary** | **built** | `tools_computer.py` (move/click/type/key/scroll); live desktop = roadmap |
 
 ---
 

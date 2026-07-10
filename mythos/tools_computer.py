@@ -238,6 +238,181 @@ def _tool_screenshot(output_path: str) -> str:
     return f"Saved screenshot to {output_path}"
 
 
+# --------------------------------------------------------------------------- #
+# Perception→action loop: cursor + keyboard control                           #
+# --------------------------------------------------------------------------- #
+# The canonical computer-use vocabulary (Anthropic computer-use / Operator):
+# the model looks at a `screenshot`, then emits a small deterministic action.
+# Backends degrade down a ladder (pyautogui → xdotool → none); with no GUI the
+# actions return a structured ERROR instead of raising. All are outward/mutating
+# (in roles._MUTATING_TOOLS + approvals _OUTWARD_TOOLS), so a `restricted`
+# operator keeps only perception (screenshot + clipboard_get), and an
+# approvals-gated operator confirms each action.
+
+class _ActionBackend:
+    def move(self, x: int, y: int) -> None: ...
+    def click(self, x: int, y: int, button: str, count: int) -> None: ...
+    def type(self, text: str) -> None: ...
+    def key(self, keys: str) -> None: ...
+    def scroll(self, direction: str, amount: int) -> None: ...
+
+
+class _PyAutoGuiBackend(_ActionBackend):
+    def __init__(self) -> None:
+        import pyautogui  # noqa: PLC0415
+
+        pyautogui.FAILSAFE = False
+        self._g = pyautogui
+
+    def move(self, x, y):
+        self._g.moveTo(x, y)
+
+    def click(self, x, y, button, count):
+        self._g.click(x=x, y=y, button=button, clicks=count)
+
+    def type(self, text):
+        self._g.typewrite(text, interval=0.012)
+
+    def key(self, keys):
+        parts = [k.strip() for k in keys.replace("-", "+").split("+") if k.strip()]
+        self._g.hotkey(*parts) if len(parts) > 1 else self._g.press(parts[0])
+
+    def scroll(self, direction, amount):
+        step = amount * (1 if direction == "up" else -1)
+        self._g.scroll(step * 100)
+
+
+class _XdotoolBackend(_ActionBackend):
+    def _do(self, argv):
+        result = _run(argv)
+        if result.returncode != 0:
+            raise RuntimeError((result.stderr or "").strip() or "xdotool failed")
+
+    def move(self, x, y):
+        self._do(["xdotool", "mousemove", str(x), str(y)])
+
+    def click(self, x, y, button, count):
+        btn = {"left": "1", "middle": "2", "right": "3"}.get(button, "1")
+        self._do(["xdotool", "mousemove", str(x), str(y),
+                  "click", "--repeat", str(count), "--delay", "180", btn])
+
+    def type(self, text):
+        self._do(["xdotool", "type", "--delay", "12", "--", text])
+
+    def key(self, keys):
+        self._do(["xdotool", "key", "--", keys.replace("+", "+")])
+
+    def scroll(self, direction, amount):
+        btn = "4" if direction == "up" else "5"
+        self._do(["xdotool", "click", "--repeat", str(max(1, amount)), btn])
+
+
+_ACTION_BACKEND: Optional[_ActionBackend] = None
+
+
+def _get_action_backend() -> Optional[_ActionBackend]:
+    global _ACTION_BACKEND
+    if _ACTION_BACKEND is not None:
+        return _ACTION_BACKEND
+    try:
+        _ACTION_BACKEND = _PyAutoGuiBackend()
+        return _ACTION_BACKEND
+    except Exception:  # noqa: BLE001 – pyautogui missing / no display
+        pass
+    if platform.system() != "Windows" and shutil.which("xdotool"):
+        _ACTION_BACKEND = _XdotoolBackend()
+        return _ACTION_BACKEND
+    return None
+
+
+def set_action_backend(backend: Optional[_ActionBackend]) -> None:
+    """Inject an action backend (tests) or reset to lazy creation with None."""
+    global _ACTION_BACKEND
+    _ACTION_BACKEND = backend
+
+
+_NO_BACKEND = (
+    "ERROR: no input backend — install pyautogui, or xdotool on Linux "
+    "(and run with a display)"
+)
+
+
+def _coord(x, y):
+    try:
+        return int(x), int(y)
+    except (TypeError, ValueError):
+        return None
+
+
+def _tool_computer_move(x: int, y: int) -> str:
+    xy = _coord(x, y)
+    if xy is None:
+        return "ERROR: x and y must be integers"
+    be = _get_action_backend()
+    if be is None:
+        return _NO_BACKEND
+    try:
+        be.move(*xy)
+        return f"Moved cursor to ({xy[0]}, {xy[1]})"
+    except Exception as exc:  # noqa: BLE001
+        return f"ERROR: move failed: {exc}"
+
+
+def _tool_computer_click(x: int, y: int, button: str = "left", count: int = 1) -> str:
+    if button not in ("left", "right", "middle"):
+        return "ERROR: button must be left, right, or middle"
+    xy = _coord(x, y)
+    if xy is None:
+        return "ERROR: x and y must be integers"
+    be = _get_action_backend()
+    if be is None:
+        return _NO_BACKEND
+    try:
+        be.click(xy[0], xy[1], button, max(1, int(count)))
+        return f"{button}-clicked at ({xy[0]}, {xy[1]})" + (f" ×{count}" if count > 1 else "")
+    except Exception as exc:  # noqa: BLE001
+        return f"ERROR: click failed: {exc}"
+
+
+def _tool_computer_type(text: str) -> str:
+    if len(text) > _MAX_TEXT:
+        return f"ERROR: text exceeds the {_MAX_TEXT} character cap"
+    be = _get_action_backend()
+    if be is None:
+        return _NO_BACKEND
+    try:
+        be.type(text)
+        return f"Typed {len(text)} characters"
+    except Exception as exc:  # noqa: BLE001
+        return f"ERROR: type failed: {exc}"
+
+
+def _tool_computer_key(keys: str) -> str:
+    if not keys.strip():
+        return "ERROR: keys is empty"
+    be = _get_action_backend()
+    if be is None:
+        return _NO_BACKEND
+    try:
+        be.key(keys.strip())
+        return f"Pressed {keys}"
+    except Exception as exc:  # noqa: BLE001
+        return f"ERROR: key failed: {exc}"
+
+
+def _tool_computer_scroll(direction: str = "down", amount: int = 3) -> str:
+    if direction not in ("up", "down"):
+        return "ERROR: direction must be 'up' or 'down'"
+    be = _get_action_backend()
+    if be is None:
+        return _NO_BACKEND
+    try:
+        be.scroll(direction, max(1, int(amount)))
+        return f"Scrolled {direction} ×{amount}"
+    except Exception as exc:  # noqa: BLE001
+        return f"ERROR: scroll failed: {exc}"
+
+
 COMPUTER_TOOLS: List[Tool] = [
     Tool(
         name="open_url",
@@ -285,5 +460,51 @@ COMPUTER_TOOLS: List[Tool] = [
         },
         func=_tool_screenshot,
         required=["output_path"],
+    ),
+    Tool(
+        name="computer_move",
+        description="Move the mouse cursor to absolute screen coordinates.",
+        parameters={
+            "x": {"type": "integer", "description": "X pixel."},
+            "y": {"type": "integer", "description": "Y pixel."},
+        },
+        func=_tool_computer_move,
+        required=["x", "y"],
+    ),
+    Tool(
+        name="computer_click",
+        description="Click at absolute screen coordinates (button left|right|middle).",
+        parameters={
+            "x": {"type": "integer", "description": "X pixel."},
+            "y": {"type": "integer", "description": "Y pixel."},
+            "button": {"type": "string", "description": "left | right | middle.", "default": "left"},
+            "count": {"type": "integer", "description": "Click count (2 = double).", "default": 1},
+        },
+        func=_tool_computer_click,
+        required=["x", "y"],
+    ),
+    Tool(
+        name="computer_type",
+        description="Type a string of text at the current focus.",
+        parameters={"text": {"type": "string", "description": "Text to type."}},
+        func=_tool_computer_type,
+        required=["text"],
+    ),
+    Tool(
+        name="computer_key",
+        description="Press a key or chord, e.g. 'Return', 'ctrl+s', 'cmd+space'.",
+        parameters={"keys": {"type": "string", "description": "Key or +-joined chord."}},
+        func=_tool_computer_key,
+        required=["keys"],
+    ),
+    Tool(
+        name="computer_scroll",
+        description="Scroll the active window up or down.",
+        parameters={
+            "direction": {"type": "string", "description": "up | down.", "default": "down"},
+            "amount": {"type": "integer", "description": "Scroll steps.", "default": 3},
+        },
+        func=_tool_computer_scroll,
+        required=[],
     ),
 ]

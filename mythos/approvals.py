@@ -43,6 +43,7 @@ _OUTWARD_TOOLS = frozenset({
     "open_url", "open_path", "notify", "speak",
     "mail_send", "send_email", "post", "purchase",
     "browser_navigate", "browser_click", "browser_fill",
+    "computer_move", "computer_click", "computer_type", "computer_key", "computer_scroll",
 })
 _REVERSIBLE_TOOLS = frozenset({
     "write_file", "append_file", "clipboard_set", "pa_draft_email",

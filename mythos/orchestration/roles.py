@@ -117,6 +117,11 @@ ROLE_TOOLS: Dict[str, List[str]] = {
         "clipboard_set",
         "notify",
         "screenshot",
+        "computer_move",
+        "computer_click",
+        "computer_type",
+        "computer_key",
+        "computer_scroll",
         "read_file",
         "list_directory",
         "current_time",
@@ -151,6 +156,11 @@ _MUTATING_TOOLS = frozenset({
     "browser_navigate",
     "browser_click",
     "browser_fill",
+    "computer_move",
+    "computer_click",
+    "computer_type",
+    "computer_key",
+    "computer_scroll",
 })
 
 
