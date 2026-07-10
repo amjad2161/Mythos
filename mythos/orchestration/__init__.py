@@ -54,6 +54,8 @@ __all__ = [
     "evaluate_posture",
     "AuditLog",
     "replay",
+    "Scheduler",
+    "Routine",
 ]
 
 # Heavier members pull in the agent stack / optional deps; kept lazy so that
@@ -71,6 +73,8 @@ _LAZY = {
     "evaluate_posture": ("posture", "evaluate_posture"),
     "AuditLog": ("audit", "AuditLog"),
     "replay": ("audit", "replay"),
+    "Scheduler": ("scheduler", "Scheduler"),
+    "Routine": ("scheduler", "Routine"),
 }
 
 

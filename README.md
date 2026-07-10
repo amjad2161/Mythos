@@ -111,6 +111,7 @@ python main.py --init      # write ~/.mythos/env config template
 python main.py --doctor    # diagnose: API key, packages, RabbitMQ/Qdrant, voice/nav
 python main.py --serve     # the web control panel (--port 8642 --host 127.0.0.1)
 python main.py --swarm     # interactive swarm shell (goal after goal, shared memory)
+python main.py --schedule knowledge/routines.example.json   # proactive routine daemon
 ```
 
 ## Multi-agent swarm (Phase A)

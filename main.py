@@ -166,6 +166,16 @@ def parse_args() -> argparse.Namespace:
         ),
     )
 
+    parser.add_argument(
+        "--schedule",
+        metavar="FILE",
+        default=None,
+        help=(
+            "Run the proactive scheduler daemon: fire the goals in a routines "
+            "JSON file (interval/daily-at) through the swarm until interrupted."
+        ),
+    )
+
     pc_group = parser.add_argument_group("local install (PC)")
     pc_group.add_argument(
         "--init",
@@ -319,6 +329,50 @@ def run_swarm(args: argparse.Namespace, config: MythosConfig) -> int:
         runtime.shutdown()
 
 
+def run_schedule(args: argparse.Namespace, config: MythosConfig) -> int:
+    """Run the proactive scheduler: fire routine goals through the swarm."""
+    import time  # noqa: PLC0415
+
+    from mythos.orchestration.runtime import SwarmRuntime  # noqa: PLC0415
+    from mythos.orchestration.scheduler import Scheduler, load_routines  # noqa: PLC0415
+    from mythos.orchestration.workflows import get_workflow  # noqa: PLC0415
+
+    routines = load_routines(args.schedule)
+    if not routines:
+        print(f"error: no routines loaded from '{args.schedule}'", file=sys.stderr)
+        return 1
+
+    orch_config = _build_orch_config(args, config)
+    try:
+        workflow = get_workflow(args.workflow)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    runtime = SwarmRuntime(config=orch_config, agent_config=config, workflow=workflow)
+
+    def fire(routine) -> None:
+        print(f"[scheduler] firing '{routine.id}': {routine.goal}")
+        try:
+            print(runtime.run(routine.goal))
+        except Exception as exc:  # noqa: BLE001 – one routine failure never stops the daemon
+            print(f"[scheduler] routine '{routine.id}' failed: {exc}", file=sys.stderr)
+
+    scheduler = Scheduler(fire=fire)
+    for routine in routines:
+        scheduler.add(routine)
+    scheduler.start()
+    print(f"Mythos scheduler running {len(routines)} routine(s). Ctrl-C to stop.")
+    try:
+        while True:
+            time.sleep(3600)
+    except KeyboardInterrupt:
+        print("\nStopping scheduler.")
+    finally:
+        scheduler.stop()
+        runtime.shutdown()
+    return 0
+
+
 def run_knowledge_base(args: argparse.Namespace, config: MythosConfig) -> int:
     """Ingest a taxonomy file and/or query the Data Matrix, then exit.
 
@@ -426,6 +480,9 @@ def main() -> int:
 
     if args.ingest or args.kb_query:
         return run_knowledge_base(args, config)
+
+    if args.schedule:
+        return run_schedule(args, config)
 
     if args.serve:
         return run_serve(args, config)
