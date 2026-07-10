@@ -58,6 +58,126 @@ Try it offline (no API key needed) with the deterministic stub backend:
 python main.py --provider stub "smoke test"
 ```
 
+## Engineering dossier
+
+The full delivery documentation set lives in [`docs/`](docs/):
+
+| Document | What it covers |
+|---|---|
+| [JARVIS_BLUEPRINT.md](docs/JARVIS_BLUEPRINT.md) | **The master A-Z blueprint** — the whole system unified into one JARVIS-class assistant (computer use, web use, secretary, singularity orchestration), with a built-vs-designed status matrix |
+| [ARCHITECTURE.md](docs/ARCHITECTURE.md) | The three-layer design, M2M protocol, Data Matrix, roadmap |
+| [PRD.md](docs/PRD.md) | Problem, personas, user journeys, FR/NFR requirements, KPIs, release criteria |
+| [SECURITY.md](docs/SECURITY.md) | Trust boundaries, STRIDE threat model, permissions/access levels, hardening checklist |
+| [OPERATIONS.md](docs/OPERATIONS.md) | Topology, config reference, health checks, runbook procedures, scaling |
+| [QA.md](docs/QA.md) | Test architecture, coverage map, gap analysis, release quality gates |
+| [PERFORMANCE.md](docs/PERFORMANCE.md) | Measured benchmarks (`scripts/bench.py`), capacity envelope, limits |
+| [VISION_MAP.md](docs/VISION_MAP.md) | The full autonomous-agent vision mapped layer-by-layer onto the code |
+| [JARVIS_ANALYSIS.md](docs/JARVIS_ANALYSIS.md) | Comparison vs Microsoft JARVIS/HuggingGPT, Leon AI; what to adopt/offer |
+
+## Run it on your PC (one command)
+
+```bash
+./scripts/launch.sh          # Linux/macOS   (add --offline for no-docker mode)
+.\scripts\launch.ps1         # Windows       (add -Offline for no-docker mode)
+```
+
+The launcher creates a virtualenv, installs Mythos, writes a config template
+to `~/.mythos/env` (put your `ANTHROPIC_API_KEY` there — it and `./.env` are
+loaded automatically), starts RabbitMQ + Qdrant if docker is available, runs
+the environment doctor, and opens the **local web control panel** at
+http://127.0.0.1:8642 — submit goals from the browser and watch each step of
+the Task Ledger progress live.
+
+Individual pieces:
+
+```bash
+python main.py --init      # write ~/.mythos/env config template
+python main.py --doctor    # diagnose: API key, packages, RabbitMQ/Qdrant, voice/nav
+python main.py --serve     # the web control panel (--port 8642 --host 127.0.0.1)
+python main.py --swarm     # interactive swarm shell (goal after goal, shared memory)
+```
+
+## Multi-agent swarm (Phase A)
+
+Mythos also runs as a **multi-agent system**: an orchestrator decomposes the
+goal, routes strict JSON work orders over RabbitMQ to specialised workers,
+a critic validates every result (autonomously retrying failed work with the
+exact error output), and all shared knowledge lives in a Qdrant-backed
+"Data Matrix" (vector search + knowledge graph). Full design:
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+```bash
+pip install -e ".[orchestration]"   # pika + qdrant-client + fastembed
+docker compose up -d                # RabbitMQ (5672) + Qdrant (6333)
+
+export ANTHROPIC_API_KEY=sk-ant-...
+python main.py --swarm "Write a Python script that prints the Fibonacci sequence to /tmp/fib.py"
+```
+
+Everything also runs offline with in-memory drivers (no Docker, no API key):
+
+```bash
+python main.py --swarm --provider stub --bus inmemory --matrix inmemory "demo"
+```
+
+(In stub mode the critic cannot obtain a real verdict, so this demonstrates
+the fail-safe path: three autonomous retries, then a reported failure.)
+
+**Dynamic orchestration (Phase B)** — instead of a rigid workflow, a cheap
+routing model decomposes the goal into role-assigned steps (strict JSON,
+deterministic fallback on parse failure):
+
+```bash
+python main.py --swarm --dynamic "Plan a driving route from Haifa to Eilat and narrate it as audio"
+```
+
+Specialised roles and their services:
+
+| Role | Tools | Needs |
+|---|---|---|
+| `backend_dev` | files, shell, calculate | — |
+| `researcher` | SSRF-hardened `web_fetch` (no shell) | network egress |
+| `navigator` | `ors_geocode/directions/isochrones/matrix` | `ORS_API_KEY` ([free key](https://openrouteservice.org)) or self-hosted `MYTHOS_ORS_URL` |
+| `voice` | `speak` → OpenAI-compatible TTS sidecar | `MYTHOS_TTS_URL` (e.g. `docker compose --profile voice up` — supertonic: MIT code, OpenRAIL-M model weights) |
+| `assistant` | digital secretary: `pa_add_task/list_tasks/complete_task`, `pa_add_note/list_notes`, `pa_set_reminder/due_reminders`, `pa_draft_email`, `pa_daily_brief` | local JSON store (`MYTHOS_ASSISTANT_DIR`, default `~/.mythos/assistant`) — offline |
+| `operator` | computer use: `open_url`, `open_path`, `clipboard_get/set`, `notify`, `screenshot` (no shell) | OS backends where present (xdg-open, xclip/wl-clip, notify-send, mss/scrot); degrades gracefully |
+
+Every role carries a Markdown **persona** (override with `MYTHOS_PERSONA_DIR`);
+token spend is metered for real (`LLMResponse.usage` → Monitor budgets +
+prompt caching) and governed by an hourly/run **cost circuit breaker**
+(`MYTHOS_HOURLY_TOKEN_BUDGET`, `MYTHOS_RUN_TOKEN_BUDGET`); each goal keeps a
+durable **task ledger** in the Data Matrix.
+
+Integration tests against live services:
+
+```bash
+docker compose up -d
+python -m pytest tests/integration -m integration
+```
+
+## Knowledge base
+
+Feed the swarm curated domain knowledge as **ground truth**. A hierarchical
+taxonomy or outline (Markdown headings or numbered sections) is parsed into
+graph-linked nodes in the Data Matrix — a KB root, a `kb_category` per section,
+and a `kb_topic` per line — stored verbatim at reference trust. Agents then
+`navigate` the matrix, land on a relevant topic, and traverse its
+`belongs_to`/`part_of` edges up to the broader domain for context.
+
+```bash
+# Ingest the bundled seed taxonomy into a persistent Qdrant matrix
+docker compose up -d
+python main.py --ingest knowledge/agent_project_kb.md --matrix qdrant
+
+# Ingest-then-query in one offline run (in-memory, no services)
+python main.py --ingest knowledge/agent_project_kb.md \
+               --kb-query "autonomous agents RAG" --matrix inmemory
+```
+
+`knowledge/agent_project_kb.md` ships a 12-domain agent-development taxonomy
+(12 categories, 62 topics). Point `--ingest` at any outline of your own; use
+`--kb-name` to label it.
+
 ## Configuration
 
 Everything is configurable via `MythosConfig`, CLI flags, or environment variables:

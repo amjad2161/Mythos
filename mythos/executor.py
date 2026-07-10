@@ -92,6 +92,7 @@ class Executor:
                 continue
 
             self._monitor.record_iteration()
+            self._monitor.record_usage(response.usage)
 
             # --- Tool dispatch ---
             if response.has_tool_call:

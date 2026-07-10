@@ -1,0 +1,55 @@
+# Infrastructure for the Mythos multi-agent swarm (Phase A):
+#   RabbitMQ  – the message bus between agents (AMQP on 5672, UI on 15672)
+#   Qdrant    – the Data Matrix vector store (HTTP on 6333, gRPC on 6334)
+#
+#   docker compose up -d
+#   mythos --swarm "your goal"          # uses these services by default
+services:
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: mythos
+      RABBITMQ_DEFAULT_PASS: mythos
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  qdrant:
+    image: qdrant/qdrant:v1.12.4
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c ':> /dev/tcp/127.0.0.1/6333' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Optional TTS sidecar for the voice agent role (OpenAI-compatible
+  # /v1/audio/speech). Started only with: docker compose --profile voice up
+  # (first start downloads the supertonic package and model weights).
+  supertonic:
+    image: python:3.12-slim
+    profiles: ["voice"]
+    command: sh -c "pip install --no-cache-dir supertonic && supertonic serve --host 0.0.0.0 --port 8000"
+    ports:
+      - "8000:8000"
+
+  # Optional ASR sidecar for voice INPUT (OpenAI-compatible
+  # /v1/audio/transcriptions). Set MYTHOS_ASR_URL=http://localhost:8001.
+  # Started only with: docker compose --profile voice-in up
+  whisper:
+    image: fedirz/faster-whisper-server:latest-cpu
+    profiles: ["voice-in"]
+    ports:
+      - "8001:8000"
+
+volumes:
+  qdrant_data:

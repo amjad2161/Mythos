@@ -59,7 +59,7 @@ class TestAnthropicRequestAssembly:
         llm.chat([{"role": "user", "content": "hello"}], temperature=0.9)
         assert "temperature" not in rec["kwargs"]
 
-    def test_system_is_hoisted(self, monkeypatch):
+    def test_system_is_hoisted_as_cached_block(self, monkeypatch):
         resp = SimpleNamespace(content=[SimpleNamespace(type="text", text="hi")], stop_reason="end_turn")
         rec = _install_fake_anthropic(monkeypatch, resp)
         llm = AnthropicLLM(model="claude-opus-4-8", api_key="k")
@@ -67,8 +67,22 @@ class TestAnthropicRequestAssembly:
             {"role": "system", "content": "You are Mythos."},
             {"role": "user", "content": "hello"},
         ])
-        assert rec["kwargs"]["system"] == "You are Mythos."
+        assert rec["kwargs"]["system"] == [{
+            "type": "text",
+            "text": "You are Mythos.",
+            "cache_control": {"type": "ephemeral"},
+        }]
         assert all(m["role"] != "system" for m in rec["kwargs"]["messages"])
+
+    def test_system_plain_when_caching_disabled(self, monkeypatch):
+        resp = SimpleNamespace(content=[SimpleNamespace(type="text", text="hi")], stop_reason="end_turn")
+        rec = _install_fake_anthropic(monkeypatch, resp)
+        llm = AnthropicLLM(model="claude-opus-4-8", api_key="k", cache_system_prompt=False)
+        llm.chat([
+            {"role": "system", "content": "You are Mythos."},
+            {"role": "user", "content": "hello"},
+        ])
+        assert rec["kwargs"]["system"] == "You are Mythos."
 
     def test_tools_converted_and_parallel_disabled(self, monkeypatch):
         resp = SimpleNamespace(content=[SimpleNamespace(type="text", text="hi")], stop_reason="end_turn")

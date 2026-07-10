@@ -21,7 +21,7 @@ import operator
 import os
 import subprocess
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 # Guard rails: tool output that flows back into the LLM context is capped so a
 # single command (e.g. `cat huge.log`) cannot exhaust the context window.
@@ -231,6 +231,10 @@ def _tool_read_file(path: str) -> str:
 
 def _tool_write_file(path: str, content: str) -> str:
     """Write *content* to *path*, creating directories as needed."""
+    from .guardrails import check_path  # noqa: PLC0415
+    reason = check_path(path, write=True)
+    if reason:
+        return f"ERROR: {reason}"
     try:
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
         with open(path, "w", encoding="utf-8") as fh:
@@ -242,6 +246,10 @@ def _tool_write_file(path: str, content: str) -> str:
 
 def _tool_append_file(path: str, content: str) -> str:
     """Append *content* to *path*."""
+    from .guardrails import check_path  # noqa: PLC0415
+    reason = check_path(path, write=True)
+    if reason:
+        return f"ERROR: {reason}"
     try:
         with open(path, "a", encoding="utf-8") as fh:
             fh.write(content)
@@ -265,14 +273,19 @@ def _tool_list_directory(path: str = ".") -> str:
         return f"ERROR: {exc}"
 
 
-def _tool_run_shell(command: str, timeout: int = 30) -> str:
+def run_shell_command(command: str, timeout: int = 30) -> Tuple[int, str]:
     """
-    Execute a shell command and return combined stdout/stderr output.
+    Execute a shell command; return ``(returncode, capped combined output)``.
 
-    The command runs in a subprocess with a configurable timeout (default 30 s).
-    Dangerous operations (rm -rf /, etc.) are not prevented at this layer –
-    the agent's goal-alignment is expected to avoid destructive actions.
+    Shared by the ``run_shell`` tool and the critic's mechanical validation so
+    the two never drift.  Output is always capped with ``_truncate`` – it
+    flows back into LLM context either way.  A timeout returns
+    ``(-1, "ERROR: ...")``.
     """
+    from .guardrails import check_shell  # noqa: PLC0415
+    reason = check_shell(command)
+    if reason:
+        return -1, f"ERROR: {reason}"
     try:
         timeout = max(1, int(timeout))
     except (TypeError, ValueError):
@@ -285,14 +298,29 @@ def _tool_run_shell(command: str, timeout: int = 30) -> str:
             text=True,
             timeout=timeout,
         )
-        output = ((result.stdout or "") + (result.stderr or "")).strip()
-        if result.returncode != 0:
-            output = f"[exit code {result.returncode}]\n{output}".strip()
-        return _truncate(output) if output else "(no output)"
     except subprocess.TimeoutExpired:
-        return f"ERROR: Command timed out after {timeout} seconds"
+        return -1, f"ERROR: Command timed out after {timeout} seconds"
+    output = ((result.stdout or "") + (result.stderr or "")).strip()
+    return result.returncode, _truncate(output)
+
+
+def _tool_run_shell(command: str, timeout: int = 30) -> str:
+    """
+    Execute a shell command and return combined stdout/stderr output.
+
+    The command runs in a subprocess with a configurable timeout (default 30 s).
+    Dangerous operations (rm -rf /, etc.) are not prevented at this layer –
+    the agent's goal-alignment is expected to avoid destructive actions.
+    """
+    try:
+        returncode, output = run_shell_command(command, timeout)
     except Exception as exc:  # noqa: BLE001
         return f"ERROR: {exc}"
+    if output.startswith("ERROR:"):
+        return output
+    if returncode != 0:
+        output = f"[exit code {returncode}]\n{output}".strip()
+    return output if output else "(no output)"
 
 
 def _tool_memory_store(key: str, value: str) -> str:
@@ -310,6 +338,16 @@ def _tool_memory_recall(key: str) -> str:
 def _tool_memory_list() -> str:
     """List all keys in long-term memory."""
     return "(memory_list is not wired yet)"
+
+
+def _tool_think(thought: str) -> str:
+    """
+    A private scratchpad: record structured reasoning before acting.
+
+    The tool has no side effects – its value is giving the model an explicit
+    place to plan/reflect that is preserved in the conversation history.
+    """
+    return "Thought logged."
 
 
 def _tool_finish(conclusion: str) -> str:
@@ -448,6 +486,19 @@ def build_default_registry() -> ToolRegistry:
     ))
 
     registry.register(Tool(
+        name="think",
+        description=(
+            "Think out loud: record a structured thought (plan, hypothesis, "
+            "reflection) before acting. Has no side effects."
+        ),
+        parameters={
+            "thought": {"type": "string", "description": "The thought to record."}
+        },
+        func=_tool_think,
+        required=["thought"],
+    ))
+
+    registry.register(Tool(
         name="finish",
         description=(
             "Signal that the current goal has been fully achieved. "
@@ -463,5 +514,24 @@ def build_default_registry() -> ToolRegistry:
         func=_tool_finish,
         required=["conclusion"],
     ))
+
+    # Extended tool sets (web/geo/tts/asr) live in sibling modules; imported
+    # lazily here to keep module import order acyclic.
+    from .tools_asr import ASR_TOOLS  # noqa: PLC0415
+    from .tools_assistant import ASSISTANT_TOOLS  # noqa: PLC0415
+    from .tools_computer import COMPUTER_TOOLS  # noqa: PLC0415
+    from .tools_geo import GEO_TOOLS  # noqa: PLC0415
+    from .tools_tts import TTS_TOOLS  # noqa: PLC0415
+    from .tools_web import WEB_TOOLS  # noqa: PLC0415
+
+    for tool in (
+        *WEB_TOOLS,
+        *GEO_TOOLS,
+        *TTS_TOOLS,
+        *ASR_TOOLS,
+        *ASSISTANT_TOOLS,
+        *COMPUTER_TOOLS,
+    ):
+        registry.register(tool)
 
     return registry

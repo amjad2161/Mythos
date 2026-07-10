@@ -45,6 +45,10 @@ class LLMResponse:
         it.  Threaded back into history so the next request is wire-valid.
     raw : Any
         The original provider-specific response object.
+    usage : dict
+        Token accounting normalised across providers.  Canonical keys:
+        ``input``, ``output``, ``cache_read``, ``cache_creation`` (0 when the
+        provider does not report a figure; empty dict for scripted stubs).
     """
 
     def __init__(
@@ -54,12 +58,14 @@ class LLMResponse:
         tool_args: Optional[Dict[str, Any]] = None,
         tool_call_id: Optional[str] = None,
         raw: Any = None,
+        usage: Optional[Dict[str, int]] = None,
     ) -> None:
         self.content = content
         self.tool_name = tool_name
         self.tool_args: Dict[str, Any] = tool_args or {}
         self.tool_call_id = tool_call_id
         self.raw = raw
+        self.usage: Dict[str, int] = usage or {}
 
     @property
     def has_tool_call(self) -> bool:
@@ -130,6 +136,7 @@ class OpenAILLM(BaseLLM):
 
         response = self._client.chat.completions.create(**kwargs)
         msg = response.choices[0].message
+        usage = _openai_usage(response)
 
         if msg.tool_calls:
             tc = msg.tool_calls[0]
@@ -139,9 +146,10 @@ class OpenAILLM(BaseLLM):
                 tool_args=_safe_json_args(tc.function.arguments),
                 tool_call_id=tc.id,
                 raw=response,
+                usage=usage,
             )
 
-        return LLMResponse(content=msg.content, raw=response)
+        return LLMResponse(content=msg.content, raw=response, usage=usage)
 
 
 # ---------------------------------------------------------------------------
@@ -151,7 +159,12 @@ class OpenAILLM(BaseLLM):
 class AnthropicLLM(BaseLLM):
     """Anthropic Claude provider."""
 
-    def __init__(self, model: str, api_key: Optional[str]) -> None:
+    def __init__(
+        self,
+        model: str,
+        api_key: Optional[str],
+        cache_system_prompt: bool = True,
+    ) -> None:
         try:
             import anthropic  # noqa: PLC0415
         except ImportError as exc:
@@ -163,6 +176,8 @@ class AnthropicLLM(BaseLLM):
         self._anthropic = anthropic
         self._client = anthropic.Anthropic(api_key=api_key)
         self._model = model
+        # Escape hatch for SDKs/deployments that reject cache_control blocks.
+        self._cache_system_prompt = cache_system_prompt
 
     def chat(
         self,
@@ -194,13 +209,24 @@ class AnthropicLLM(BaseLLM):
             "max_tokens": max_tokens,
         }
         if system_msg:
-            kwargs["system"] = system_msg
+            if self._cache_system_prompt:
+                # Prompt caching: the system prompt is the stable prefix of
+                # every request in an agent loop; below the provider's minimum
+                # cacheable size the marker is simply a no-op.
+                kwargs["system"] = [{
+                    "type": "text",
+                    "text": system_msg,
+                    "cache_control": {"type": "ephemeral"},
+                }]
+            else:
+                kwargs["system"] = system_msg
         if ant_tools:
             kwargs["tools"] = ant_tools
             # One tool call per turn keeps the executor's single-call loop valid.
             kwargs["tool_choice"] = {"type": "auto", "disable_parallel_tool_use": True}
 
         response = self._client.messages.create(**kwargs)
+        usage = _anthropic_usage(response)
 
         # A safety refusal is a successful HTTP 200 with stop_reason "refusal";
         # surface it as text rather than treating an empty content list as a bug.
@@ -208,6 +234,7 @@ class AnthropicLLM(BaseLLM):
             return LLMResponse(
                 content="[The model declined to respond to this request.]",
                 raw=response,
+                usage=usage,
             )
 
         text_block = next((b for b in response.content if b.type == "text"), None)
@@ -221,9 +248,10 @@ class AnthropicLLM(BaseLLM):
                 tool_args=dict(tool_use.input) if tool_use.input else {},
                 tool_call_id=tool_use.id,
                 raw=response,
+                usage=usage,
             )
 
-        return LLMResponse(content=text or "", raw=response)
+        return LLMResponse(content=text or "", raw=response, usage=usage)
 
 
 # ---------------------------------------------------------------------------
@@ -262,6 +290,99 @@ class StubLLM(BaseLLM):
             tool_name="finish",
             tool_args={"conclusion": "Goal completed (stub fallback)."},
         )
+
+
+# ---------------------------------------------------------------------------
+# Retry decorator
+# ---------------------------------------------------------------------------
+
+# Substrings identifying transient provider failures worth retrying (rate
+# limits, overload, connection blips).  Matched case-insensitively against
+# the exception's type name and message.
+_TRANSIENT_MARKERS = (
+    "ratelimit", "rate limit", "overloaded", "apiconnection", "connection",
+    "timeout", "timed out", "internalserver", "529", "503", "502",
+)
+
+
+class RetryingLLM(BaseLLM):
+    """
+    Wraps any ``BaseLLM`` with exponential-backoff retries on transient
+    provider errors.  Non-transient errors and exhausted retries re-raise.
+    """
+
+    def __init__(
+        self,
+        inner: BaseLLM,
+        attempts: int = 3,
+        base_delay: float = 1.0,
+        jitter: float = 0.5,
+    ) -> None:
+        self._inner = inner
+        self._attempts = max(1, attempts)
+        self._base_delay = base_delay
+        self._jitter = jitter
+
+    def chat(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]] = None,
+        temperature: float = 0.2,
+        max_tokens: int = 4096,
+    ) -> LLMResponse:
+        import random  # noqa: PLC0415
+        import time  # noqa: PLC0415
+
+        last_exc: Optional[Exception] = None
+        for attempt in range(self._attempts):
+            try:
+                return self._inner.chat(
+                    messages, tools=tools, temperature=temperature, max_tokens=max_tokens
+                )
+            except Exception as exc:  # noqa: BLE001
+                if not _is_transient(exc) or attempt == self._attempts - 1:
+                    raise
+                last_exc = exc
+                time.sleep(
+                    self._base_delay * (2 ** attempt)
+                    + random.uniform(0, self._jitter)  # noqa: S311 – jitter, not crypto
+                )
+        raise last_exc  # pragma: no cover – loop always returns or raises
+
+
+def _is_transient(exc: Exception) -> bool:
+    haystack = f"{type(exc).__name__} {exc}".lower()
+    return any(marker in haystack for marker in _TRANSIENT_MARKERS)
+
+
+# ---------------------------------------------------------------------------
+# Usage extraction helpers
+# ---------------------------------------------------------------------------
+
+def _anthropic_usage(response: Any) -> Dict[str, int]:
+    """Normalise an Anthropic response's usage block (defensive getattr)."""
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return {}
+    return {
+        "input": int(getattr(usage, "input_tokens", 0) or 0),
+        "output": int(getattr(usage, "output_tokens", 0) or 0),
+        "cache_read": int(getattr(usage, "cache_read_input_tokens", 0) or 0),
+        "cache_creation": int(getattr(usage, "cache_creation_input_tokens", 0) or 0),
+    }
+
+
+def _openai_usage(response: Any) -> Dict[str, int]:
+    """Normalise an OpenAI response's usage block."""
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return {}
+    return {
+        "input": int(getattr(usage, "prompt_tokens", 0) or 0),
+        "output": int(getattr(usage, "completion_tokens", 0) or 0),
+        "cache_read": 0,
+        "cache_creation": 0,
+    }
 
 
 # ---------------------------------------------------------------------------
