@@ -89,6 +89,7 @@ The full delivery documentation set lives in [`docs/`](docs/):
 | [PERFORMANCE.md](docs/PERFORMANCE.md) | Measured benchmarks (`scripts/bench.py`), capacity envelope, limits |
 | [VISION_MAP.md](docs/VISION_MAP.md) | The full autonomous-agent vision mapped layer-by-layer onto the code |
 | [ORDERING.md](docs/ORDERING.md) | End-to-end FIFO/LIFO/priority map of every queue, buffer, window, and eviction |
+| [STRUCTURE.md](docs/STRUCTURE.md) | Package layout organized by concern (core / tools / pc / orchestration) |
 | [JARVIS_ANALYSIS.md](docs/JARVIS_ANALYSIS.md) | Comparison vs Microsoft JARVIS/HuggingGPT, Leon AI; what to adopt/offer |
 
 ## Run it on your PC (one command)

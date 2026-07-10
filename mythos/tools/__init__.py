@@ -110,7 +110,7 @@ class ToolRegistry:
         # Human-in-the-loop gate for outward/irreversible actions. No-op unless
         # MYTHOS_APPROVALS is enabled (default off → allow), so autonomous flows
         # are unchanged; when on, a denied action returns a structured refusal.
-        from .approvals import guard  # noqa: PLC0415
+        from ..approvals import guard  # noqa: PLC0415
 
         verdict = guard(name, arguments)
         if not verdict.allowed:
@@ -242,7 +242,7 @@ def _tool_read_file(path: str) -> str:
 
 def _tool_write_file(path: str, content: str) -> str:
     """Write *content* to *path*, creating directories as needed."""
-    from .guardrails import check_path  # noqa: PLC0415
+    from ..guardrails import check_path  # noqa: PLC0415
     reason = check_path(path, write=True)
     if reason:
         return f"ERROR: {reason}"
@@ -257,7 +257,7 @@ def _tool_write_file(path: str, content: str) -> str:
 
 def _tool_append_file(path: str, content: str) -> str:
     """Append *content* to *path*."""
-    from .guardrails import check_path  # noqa: PLC0415
+    from ..guardrails import check_path  # noqa: PLC0415
     reason = check_path(path, write=True)
     if reason:
         return f"ERROR: {reason}"
@@ -293,7 +293,7 @@ def run_shell_command(command: str, timeout: int = 30) -> Tuple[int, str]:
     flows back into LLM context either way.  A timeout returns
     ``(-1, "ERROR: ...")``.
     """
-    from .guardrails import check_shell  # noqa: PLC0415
+    from ..guardrails import check_shell  # noqa: PLC0415
     reason = check_shell(command)
     if reason:
         return -1, f"ERROR: {reason}"
@@ -528,13 +528,13 @@ def build_default_registry() -> ToolRegistry:
 
     # Extended tool sets (web/geo/tts/asr) live in sibling modules; imported
     # lazily here to keep module import order acyclic.
-    from .tools_asr import ASR_TOOLS  # noqa: PLC0415
-    from .tools_assistant import ASSISTANT_TOOLS  # noqa: PLC0415
-    from .tools_browser import BROWSER_TOOLS  # noqa: PLC0415
-    from .tools_computer import COMPUTER_TOOLS  # noqa: PLC0415
-    from .tools_geo import GEO_TOOLS  # noqa: PLC0415
-    from .tools_tts import TTS_TOOLS  # noqa: PLC0415
-    from .tools_web import WEB_TOOLS  # noqa: PLC0415
+    from .asr import ASR_TOOLS  # noqa: PLC0415
+    from .assistant import ASSISTANT_TOOLS  # noqa: PLC0415
+    from .browser import BROWSER_TOOLS  # noqa: PLC0415
+    from .computer import COMPUTER_TOOLS  # noqa: PLC0415
+    from .geo import GEO_TOOLS  # noqa: PLC0415
+    from .tts import TTS_TOOLS  # noqa: PLC0415
+    from .web import WEB_TOOLS  # noqa: PLC0415
 
     for tool in (
         *WEB_TOOLS,
