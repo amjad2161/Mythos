@@ -74,6 +74,40 @@ ROLE_TOOLS: Dict[str, List[str]] = {
         "think",
         "finish",
     ],
+    # Digital secretary: tasks, notes, reminders, e-mail drafts, briefings.
+    # Read-only web lookups allowed; deliberately NO shell/OS control.
+    "assistant": [
+        "pa_add_task",
+        "pa_list_tasks",
+        "pa_complete_task",
+        "pa_add_note",
+        "pa_list_notes",
+        "pa_set_reminder",
+        "pa_due_reminders",
+        "pa_draft_email",
+        "pa_daily_brief",
+        "web_fetch",
+        "read_file",
+        "write_file",
+        "current_time",
+        "think",
+        "finish",
+    ],
+    # Computer use: control the desktop (open, clipboard, notify, screenshot).
+    # Untrusted-screen input role: NO shell, NO file writes beyond screenshots.
+    "operator": [
+        "open_url",
+        "open_path",
+        "clipboard_get",
+        "clipboard_set",
+        "notify",
+        "screenshot",
+        "read_file",
+        "list_directory",
+        "current_time",
+        "think",
+        "finish",
+    ],
 }
 
 
@@ -87,7 +121,19 @@ def known_roles() -> List[str]:
 #   standard   – the role's full allow-list (default)
 #   elevated   – reserved for Phase C privileged flows; = standard for now
 ACCESS_LEVELS = ("restricted", "standard", "elevated")
-_MUTATING_TOOLS = frozenset({"run_shell", "write_file", "append_file", "speak"})
+# Outward/state-mutating tools stripped at the `restricted` access level.  For
+# the operator role this leaves perception-only capability (screenshot +
+# clipboard_get), matching the untrusted-input containment in the blueprint.
+_MUTATING_TOOLS = frozenset({
+    "run_shell",
+    "write_file",
+    "append_file",
+    "speak",
+    "open_url",
+    "open_path",
+    "clipboard_set",
+    "notify",
+})
 
 
 def build_registry_for_role(

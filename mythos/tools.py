@@ -518,11 +518,20 @@ def build_default_registry() -> ToolRegistry:
     # Extended tool sets (web/geo/tts/asr) live in sibling modules; imported
     # lazily here to keep module import order acyclic.
     from .tools_asr import ASR_TOOLS  # noqa: PLC0415
+    from .tools_assistant import ASSISTANT_TOOLS  # noqa: PLC0415
+    from .tools_computer import COMPUTER_TOOLS  # noqa: PLC0415
     from .tools_geo import GEO_TOOLS  # noqa: PLC0415
     from .tools_tts import TTS_TOOLS  # noqa: PLC0415
     from .tools_web import WEB_TOOLS  # noqa: PLC0415
 
-    for tool in (*WEB_TOOLS, *GEO_TOOLS, *TTS_TOOLS, *ASR_TOOLS):
+    for tool in (
+        *WEB_TOOLS,
+        *GEO_TOOLS,
+        *TTS_TOOLS,
+        *ASR_TOOLS,
+        *ASSISTANT_TOOLS,
+        *COMPUTER_TOOLS,
+    ):
         registry.register(tool)
 
     return registry

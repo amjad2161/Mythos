@@ -45,6 +45,14 @@ ROLE_KEYWORDS: Dict[str, Tuple[str, ...]] = {
         "research", "web", "look up", "find out", "compare", "investigate",
         "sources", "summarize the latest",
     ),
+    "assistant": (
+        "remind", "reminder", "schedule", "task", "to-do", "todo", "note",
+        "calendar", "draft an email", "draft email", "briefing", "agenda",
+    ),
+    "operator": (
+        "open", "clipboard", "copy to", "screenshot", "notify",
+        "desktop", "launch", "click",
+    ),
 }
 
 _ROLE_DESCRIPTIONS: Dict[str, str] = {
@@ -53,6 +61,8 @@ _ROLE_DESCRIPTIONS: Dict[str, str] = {
     "researcher": "gathers information from the public web and files (no shell)",
     "navigator": "geographic answers: geocoding, routing, travel times, reachability",
     "voice": "turns text into spoken audio files via the TTS service",
+    "assistant": "digital secretary: tasks, notes, reminders, e-mail drafts, daily briefings",
+    "operator": "computer use: open URLs/files, clipboard, notifications, screenshots",
 }
 
 _DECOMPOSER_SYSTEM = """\

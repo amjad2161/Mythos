@@ -64,6 +64,7 @@ The full delivery documentation set lives in [`docs/`](docs/):
 
 | Document | What it covers |
 |---|---|
+| [JARVIS_BLUEPRINT.md](docs/JARVIS_BLUEPRINT.md) | **The master A-Z blueprint** — the whole system unified into one JARVIS-class assistant (computer use, web use, secretary, singularity orchestration), with a built-vs-designed status matrix |
 | [ARCHITECTURE.md](docs/ARCHITECTURE.md) | The three-layer design, M2M protocol, Data Matrix, roadmap |
 | [PRD.md](docs/PRD.md) | Problem, personas, user journeys, FR/NFR requirements, KPIs, release criteria |
 | [SECURITY.md](docs/SECURITY.md) | Trust boundaries, STRIDE threat model, permissions/access levels, hardening checklist |
@@ -138,6 +139,8 @@ Specialised roles and their services:
 | `researcher` | SSRF-hardened `web_fetch` (no shell) | network egress |
 | `navigator` | `ors_geocode/directions/isochrones/matrix` | `ORS_API_KEY` ([free key](https://openrouteservice.org)) or self-hosted `MYTHOS_ORS_URL` |
 | `voice` | `speak` → OpenAI-compatible TTS sidecar | `MYTHOS_TTS_URL` (e.g. `docker compose --profile voice up` — supertonic: MIT code, OpenRAIL-M model weights) |
+| `assistant` | digital secretary: `pa_add_task/list_tasks/complete_task`, `pa_add_note/list_notes`, `pa_set_reminder/due_reminders`, `pa_draft_email`, `pa_daily_brief` | local JSON store (`MYTHOS_ASSISTANT_DIR`, default `~/.mythos/assistant`) — offline |
+| `operator` | computer use: `open_url`, `open_path`, `clipboard_get/set`, `notify`, `screenshot` (no shell) | OS backends where present (xdg-open, xclip/wl-clip, notify-send, mss/scrot); degrades gracefully |
 
 Every role carries a Markdown **persona** (override with `MYTHOS_PERSONA_DIR`);
 token spend is metered for real (`LLMResponse.usage` → Monitor budgets +
