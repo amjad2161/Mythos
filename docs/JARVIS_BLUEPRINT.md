@@ -422,7 +422,7 @@ an outward step (e.g. "email it to finance") would hit the approval gate.
 | **Graded health posture ladder** | **built** | `posture.py` + `CostGovernor.posture()` (NORMAL→REDUCED→PAUSED→HALT) |
 | **Event-sourced audit log + replay** | **built** | `audit.py` (`MYTHOS_AUDIT_LOG`), teed through `EventHub` |
 | Entity/relationship graph memory | designed | §3.3 |
-| HITL approvals + audit | designed | §5 |
+| **HITL approvals gate** | **built** | `approvals.py` (`MYTHOS_APPROVALS`), gated at `ToolRegistry.call` |
 | Connector adapters (cloud cal/mail) | designed | §4.3 |
 | Browser automation role | designed | §4.2 |
 | Scheduler + steering + Boss front-end | designed | §2, §4.4 |

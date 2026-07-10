@@ -216,6 +216,7 @@ Everything is configurable via `MythosConfig`, CLI flags, or environment variabl
 | `MYTHOS_MEMORY_PATH`        | `mythos_memory.json`   | Long-term memory file |
 | `MYTHOS_VERBOSE`            | `true`                 | Set `false` to silence progress output |
 | `MYTHOS_AUDIT_LOG`          | —                      | Path to a JSONL audit log; when set, every swarm lifecycle event is durably recorded for deterministic replay (`orchestration.audit.replay`) |
+| `MYTHOS_APPROVALS`          | `off`                  | Set `on` to require human approval for outward/destructive tool calls (register an approver via `mythos.approvals.set_approver`); `MYTHOS_AUTO_APPROVE=on` allows them unattended |
 
 CLI flags (`--provider`, `--model`, `--api-key`, `--max-iterations`, `--quiet`, …) override
 environment variables. See `python main.py --help`.

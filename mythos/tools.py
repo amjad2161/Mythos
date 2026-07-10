@@ -107,6 +107,17 @@ class ToolRegistry:
             return f"ERROR: Unknown tool '{name}'"
         if not isinstance(arguments, dict):
             return f"ERROR: tool arguments must be an object, got {type(arguments).__name__}"
+        # Human-in-the-loop gate for outward/irreversible actions. No-op unless
+        # MYTHOS_APPROVALS is enabled (default off → allow), so autonomous flows
+        # are unchanged; when on, a denied action returns a structured refusal.
+        from .approvals import guard  # noqa: PLC0415
+
+        verdict = guard(name, arguments)
+        if not verdict.allowed:
+            return (
+                f"ERROR: action requires approval and was not approved "
+                f"({verdict.action_class.name.lower()}): {verdict.reason}"
+            )
         return tool.call(**arguments)
 
 
