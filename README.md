@@ -152,6 +152,29 @@ docker compose up -d
 python -m pytest tests/integration -m integration
 ```
 
+## Knowledge base
+
+Feed the swarm curated domain knowledge as **ground truth**. A hierarchical
+taxonomy or outline (Markdown headings or numbered sections) is parsed into
+graph-linked nodes in the Data Matrix — a KB root, a `kb_category` per section,
+and a `kb_topic` per line — stored verbatim at reference trust. Agents then
+`navigate` the matrix, land on a relevant topic, and traverse its
+`belongs_to`/`part_of` edges up to the broader domain for context.
+
+```bash
+# Ingest the bundled seed taxonomy into a persistent Qdrant matrix
+docker compose up -d
+python main.py --ingest knowledge/agent_project_kb.md --matrix qdrant
+
+# Ingest-then-query in one offline run (in-memory, no services)
+python main.py --ingest knowledge/agent_project_kb.md \
+               --kb-query "autonomous agents RAG" --matrix inmemory
+```
+
+`knowledge/agent_project_kb.md` ships a 12-domain agent-development taxonomy
+(12 categories, 62 topics). Point `--ingest` at any outline of your own; use
+`--kb-name` to label it.
+
 ## Configuration
 
 Everything is configurable via `MythosConfig`, CLI flags, or environment variables:

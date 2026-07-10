@@ -121,6 +121,31 @@ def parse_args() -> argparse.Namespace:
         ),
     )
 
+    kb_group = parser.add_argument_group("knowledge base")
+    kb_group.add_argument(
+        "--ingest",
+        metavar="FILE",
+        default=None,
+        help=(
+            "Ingest a taxonomy/outline file into the Data Matrix as a linked "
+            "knowledge graph (uses the configured --matrix backend), then exit."
+        ),
+    )
+    kb_group.add_argument(
+        "--kb-name",
+        default=None,
+        help="Name for the ingested knowledge base (default: the file stem).",
+    )
+    kb_group.add_argument(
+        "--kb-query",
+        metavar="NEED",
+        default=None,
+        help=(
+            "Navigate the Data Matrix for NEED and print the fused context "
+            "(pair with --ingest to ingest-then-query in one run), then exit."
+        ),
+    )
+
     pc_group = parser.add_argument_group("local install (PC)")
     pc_group.add_argument(
         "--init",
@@ -261,6 +286,44 @@ def run_swarm(args: argparse.Namespace, config: MythosConfig) -> int:
         runtime.shutdown()
 
 
+def run_knowledge_base(args: argparse.Namespace, config: MythosConfig) -> int:
+    """Ingest a taxonomy file and/or query the Data Matrix, then exit.
+
+    Uses the configured ``--matrix`` backend: ``qdrant`` persists the knowledge
+    base for later swarm runs; ``inmemory`` is process-local (useful to ingest
+    and immediately ``--kb-query`` in the same invocation as a smoke test).
+    """
+    import os  # noqa: PLC0415
+
+    from mythos.orchestration.ingest import ingest_taxonomy  # noqa: PLC0415
+    from mythos.orchestration.matrix import fuse_context  # noqa: PLC0415
+    from mythos.orchestration.runtime import create_matrix  # noqa: PLC0415
+
+    orch_config = _build_orch_config(args, config)
+    matrix = create_matrix(orch_config)
+
+    if args.ingest:
+        try:
+            with open(args.ingest, encoding="utf-8") as handle:
+                text = handle.read()
+        except OSError as exc:
+            print(f"error: cannot read '{args.ingest}': {exc}", file=sys.stderr)
+            return 1
+        kb_name = args.kb_name or os.path.splitext(os.path.basename(args.ingest))[0]
+        result = ingest_taxonomy(matrix, text, kb_name)
+        print(result.summary())
+
+    if args.kb_query:
+        nodes = matrix.navigate(args.kb_query, top_k=5, hops=1)
+        if not nodes:
+            print(f"(no knowledge-base matches for {args.kb_query!r})")
+        else:
+            print(f"\nTop knowledge for {args.kb_query!r}:")
+            print(fuse_context(nodes))
+
+    return 0
+
+
 def run_serve(args: argparse.Namespace, config: MythosConfig) -> int:
     """Start the local web control panel."""
     from mythos.orchestration.runtime import SwarmRuntime  # noqa: PLC0415
@@ -317,6 +380,9 @@ def main() -> int:
         return doctor_exit_code(results)
 
     config = build_config(args)
+
+    if args.ingest or args.kb_query:
+        return run_knowledge_base(args, config)
 
     if args.serve:
         return run_serve(args, config)

@@ -47,6 +47,9 @@ __all__ = [
     "TaskLedger",
     "CostGovernor",
     "DynamicDecomposer",
+    "ingest_taxonomy",
+    "parse_taxonomy",
+    "IngestResult",
 ]
 
 # Heavier members pull in the agent stack / optional deps; kept lazy so that
@@ -57,6 +60,9 @@ _LAZY = {
     "TaskLedger": ("ledger", "TaskLedger"),
     "CostGovernor": ("governor", "CostGovernor"),
     "DynamicDecomposer": ("decomposer", "DynamicDecomposer"),
+    "ingest_taxonomy": ("ingest", "ingest_taxonomy"),
+    "parse_taxonomy": ("ingest", "parse_taxonomy"),
+    "IngestResult": ("ingest", "IngestResult"),
 }
 
 
