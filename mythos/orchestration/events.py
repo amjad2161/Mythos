@@ -133,9 +133,14 @@ class EventHub:
             subs = list(self._subs)
             audit = self._audit
         if audit is not None:
-            audit.append(
-                kind, ts_ms=stamp, trace_id=trace_id, task_id=task_id, role=role, **detail
-            )
+            # Persistence must never break event fan-out — the durable sink is
+            # best-effort (a bad payload / disk error can't stall the swarm).
+            try:
+                audit.append(
+                    kind, ts_ms=stamp, trace_id=trace_id, task_id=task_id, role=role, **detail
+                )
+            except Exception:  # noqa: BLE001 – audit is best-effort, never fatal
+                pass
         for sub in subs:
             sub.offer(event)
         return event

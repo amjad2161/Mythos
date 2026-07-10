@@ -290,7 +290,12 @@ class LocalLLM(BaseLLM):
         self._url = base.rstrip("/") + "/chat/completions"
         self._model = model
         self._api_key = api_key or os.getenv("MYTHOS_LOCAL_API_KEY", "local")
-        self._timeout = int(os.getenv("MYTHOS_LOCAL_TIMEOUT_S", "120"))
+        # A malformed timeout env var is a config typo, not a reason to refuse
+        # to start — fall back to the default rather than raising.
+        try:
+            self._timeout = max(1, int(os.getenv("MYTHOS_LOCAL_TIMEOUT_S", "120")))
+        except ValueError:
+            self._timeout = 120
 
     def chat(
         self,
@@ -309,6 +314,10 @@ class LocalLLM(BaseLLM):
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
+            # Match OpenAILLM: one tool call per turn so nothing is silently
+            # dropped (we only consume tool_calls[0]). Harmless if the backend
+            # ignores the flag.
+            payload["parallel_tool_calls"] = False
 
         request = urllib.request.Request(
             self._url,

@@ -78,3 +78,23 @@ class TestEventHubTee:
         hub = EventHub()  # no audit sink
         ev = hub.emit("goal.started", trace_id="x")
         assert ev.kind == "goal.started"
+
+    def test_audit_failure_never_breaks_emit(self):
+        class BoomAudit:
+            def append(self, *a, **k):
+                raise RuntimeError("sink exploded")
+
+        hub = EventHub(audit=BoomAudit())
+        # a misbehaving durable sink must not stall event fan-out
+        ev = hub.emit("goal.started", trace_id="x")
+        assert ev.kind == "goal.started"
+
+    def test_non_serializable_payload_persists_without_raising(self, tmp_path):
+        import datetime
+
+        path = tmp_path / "audit.jsonl"
+        log = AuditLog(path=str(path))
+        # a datetime is not natively JSON-serializable; persistence must not raise
+        log.append("goal.started", when=datetime.datetime(2026, 7, 10))
+        assert log.to_jsonl()  # does not raise
+        assert path.exists()

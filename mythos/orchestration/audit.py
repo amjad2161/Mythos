@@ -58,18 +58,22 @@ class AuditLog:
 
     def to_jsonl(self) -> str:
         with self._lock:
+            # default=str keeps a stray non-JSON value (e.g. a datetime in a
+            # payload) from turning serialization into a hard error.
             return "\n".join(
-                json.dumps(e.to_dict(), sort_keys=True) for e in self._events
+                json.dumps(e.to_dict(), sort_keys=True, default=str) for e in self._events
             )
 
     def _persist(self, event: AuditEvent) -> None:
-        # Caller holds the lock. Best-effort append; never raise into the swarm.
+        # Caller holds the lock. Best-effort append; never raise into the swarm —
+        # broadened past OSError to cover json.dumps failures on odd payloads.
         try:
+            line = json.dumps(event.to_dict(), sort_keys=True, default=str)
             directory = os.path.dirname(os.path.abspath(self._path))
             os.makedirs(directory, exist_ok=True)
             with open(self._path, "a", encoding="utf-8") as handle:
-                handle.write(json.dumps(event.to_dict(), sort_keys=True) + "\n")
-        except OSError:
+                handle.write(line + "\n")
+        except (OSError, TypeError, ValueError):
             pass
 
     @classmethod

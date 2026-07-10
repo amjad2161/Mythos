@@ -110,6 +110,15 @@ def test_tools_included_in_payload(monkeypatch):
     )
     assert captured["body"]["tool_choice"] == "auto"
     assert captured["body"]["tools"][0]["function"]["name"] == "t"
+    # single tool call per turn, like OpenAILLM, so nothing is silently dropped
+    assert captured["body"]["parallel_tool_calls"] is False
+
+
+def test_malformed_timeout_env_falls_back(monkeypatch):
+    monkeypatch.setenv("MYTHOS_LOCAL_TIMEOUT_S", "not-a-number")
+    assert LocalLLM("m")._timeout == 120  # config typo must not crash startup
+    monkeypatch.setenv("MYTHOS_LOCAL_TIMEOUT_S", "45")
+    assert LocalLLM("m")._timeout == 45
 
 
 def test_http_error_raises_runtime(monkeypatch):
