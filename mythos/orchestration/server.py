@@ -342,106 +342,182 @@ def serve_forever(
 # Dashboard page (inline: the server must stay dependency- and asset-free)
 # ---------------------------------------------------------------------------
 
-DASHBOARD_HTML = """<!DOCTYPE html>
+DASHBOARD_HTML = r"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Mythos Control Panel</title>
 <style>
-:root{--bg:#0d1117;--panel:#161b22;--line:#30363d;--text:#e6edf3;--dim:#8b949e;
---accent:#58a6ff;--ok:#3fb950;--bad:#f85149;--run:#d29922}
-*{box-sizing:border-box}body{margin:0;font:14px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;
-background:var(--bg);color:var(--text)}
-header{padding:16px 24px;border-bottom:1px solid var(--line);display:flex;gap:16px;align-items:baseline}
-h1{font-size:18px;margin:0}#status{color:var(--dim);font-size:12px}
-main{max-width:980px;margin:0 auto;padding:24px;display:grid;gap:16px}
-.panel{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:16px}
-form{display:flex;gap:8px}input[type=text]{flex:1;background:var(--bg);border:1px solid var(--line);
-border-radius:6px;color:var(--text);padding:10px;font:inherit}
-button{background:var(--accent);color:#0d1117;border:0;border-radius:6px;padding:10px 18px;
-font:inherit;font-weight:700;cursor:pointer}
-.run{border-top:1px solid var(--line);padding:10px 0;cursor:pointer}
-.run:first-child{border-top:0}
-.badge{display:inline-block;min-width:86px;text-align:center;border-radius:12px;padding:1px 10px;
-font-size:12px;font-weight:700}
-.queued{background:#30363d}.running{background:var(--run);color:#0d1117}
-.completed{background:var(--ok);color:#0d1117}.failed{background:var(--bad);color:#0d1117}
-.goal{margin-left:10px}.dim{color:var(--dim);font-size:12px}
-#detail pre{white-space:pre-wrap;word-break:break-word;background:var(--bg);
-border:1px solid var(--line);border-radius:6px;padding:12px;max-height:340px;overflow:auto}
-.step{display:flex;gap:10px;padding:4px 0;align-items:baseline}
-.step .badge{min-width:86px}
+:root{
+  --bg:#070b12; --bg2:#0b1220; --panel:rgba(18,26,42,.72); --line:rgba(120,160,220,.16);
+  --text:#e8f1ff; --dim:#8aa0c2; --accent:#38e0ff; --accent2:#7c5cff;
+  --ok:#37e39b; --bad:#ff5c6c; --run:#ffbe4d; --warn:#ff8a3d;
+  --glow:0 0 0 1px rgba(56,224,255,.18), 0 8px 40px rgba(8,16,32,.6);
+}
+*{box-sizing:border-box}
+html,body{margin:0;min-height:100%}
+body{
+  font:14px/1.55 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+  color:var(--text); background:
+    radial-gradient(1200px 600px at 80% -10%, rgba(124,92,255,.18), transparent 60%),
+    radial-gradient(900px 500px at 0% 0%, rgba(56,224,255,.12), transparent 55%),
+    linear-gradient(180deg,var(--bg),var(--bg2));
+  background-attachment:fixed;
+}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+header{
+  position:sticky;top:0;z-index:5;backdrop-filter:blur(12px);
+  padding:14px 22px;border-bottom:1px solid var(--line);
+  display:flex;gap:18px;align-items:center;flex-wrap:wrap;
+  background:linear-gradient(180deg,rgba(8,14,24,.85),rgba(8,14,24,.55));
+}
+.brand{display:flex;align-items:center;gap:12px;font-weight:800;letter-spacing:.5px;font-size:17px}
+.reactor{width:26px;height:26px;border-radius:50%;position:relative;flex:0 0 auto;
+  background:radial-gradient(circle at 50% 50%,#eafcff 0 18%,var(--accent) 22% 40%,transparent 46%);
+  box-shadow:0 0 14px var(--accent),0 0 28px rgba(56,224,255,.5);animation:pulse 3s ease-in-out infinite}
+@keyframes pulse{0%,100%{opacity:.85;transform:scale(1)}50%{opacity:1;transform:scale(1.08)}}
+.brand small{color:var(--dim);font-weight:600;letter-spacing:3px;font-size:10px;display:block;margin-top:-2px}
+#statusbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-left:auto}
+.chip{font-size:11px;font-weight:700;color:var(--dim);border:1px solid var(--line);
+  border-radius:999px;padding:3px 10px;background:rgba(120,160,220,.06);white-space:nowrap}
+.chip b{color:var(--text);font-weight:700}
+.pill{font-size:11px;font-weight:800;border-radius:999px;padding:3px 11px;letter-spacing:.4px}
+.p-NORMAL{background:rgba(55,227,155,.16);color:var(--ok);border:1px solid rgba(55,227,155,.4)}
+.p-REDUCED{background:rgba(255,190,77,.16);color:var(--run);border:1px solid rgba(255,190,77,.4)}
+.p-PAUSED{background:rgba(255,138,61,.16);color:var(--warn);border:1px solid rgba(255,138,61,.4)}
+.p-HALT{background:rgba(255,92,108,.18);color:var(--bad);border:1px solid rgba(255,92,108,.5)}
+main{max-width:1100px;margin:0 auto;padding:22px;display:grid;gap:16px;
+  grid-template-columns:1fr 1fr}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px 18px;
+  box-shadow:var(--glow);backdrop-filter:blur(6px)}
+.span2{grid-column:1/-1}
+.label{font-size:11px;letter-spacing:2.5px;color:var(--dim);font-weight:700;margin-bottom:10px}
+form{display:flex;gap:10px}
+input[type=text]{flex:1;background:rgba(6,11,18,.7);border:1px solid var(--line);border-radius:10px;
+  color:var(--text);padding:13px 14px;font:inherit;outline:none;transition:.15s}
+input[type=text]:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(56,224,255,.15)}
+button{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#06121a;border:0;
+  border-radius:10px;padding:13px 22px;font:inherit;font-weight:800;cursor:pointer;letter-spacing:.3px;
+  box-shadow:0 6px 20px rgba(56,224,255,.25);transition:.15s}
+button:hover{filter:brightness(1.08);transform:translateY(-1px)}
+button:active{transform:translateY(0)}
+.run{display:flex;gap:10px;align-items:center;border-radius:10px;padding:10px 12px;cursor:pointer;
+  border:1px solid transparent;transition:.12s}
+.run:hover{background:rgba(120,160,220,.07);border-color:var(--line)}
+.run.sel{background:rgba(56,224,255,.08);border-color:rgba(56,224,255,.35)}
+.badge{display:inline-flex;align-items:center;justify-content:center;min-width:82px;border-radius:999px;
+  padding:3px 10px;font-size:11px;font-weight:800;letter-spacing:.3px}
+.queued,.pending{background:rgba(120,160,220,.16);color:var(--dim)}
+.running,.dispatched{background:rgba(255,190,77,.18);color:var(--run)}
+.completed,.validated{background:rgba(55,227,155,.18);color:var(--ok)}
+.failed{background:rgba(255,92,108,.18);color:var(--bad)}
+.goal{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dim{color:var(--dim)}.tiny{font-size:11px}
+#detail pre{white-space:pre-wrap;word-break:break-word;background:rgba(6,11,18,.7);
+  border:1px solid var(--line);border-radius:10px;padding:12px;max-height:320px;overflow:auto;font-size:12.5px}
+.step{display:flex;gap:10px;padding:6px 0;align-items:baseline;border-top:1px dashed var(--line)}
+.step:first-child{border-top:0}
+#events{max-height:340px;overflow:auto;font-size:12.5px;line-height:1.7}
+.ev{display:flex;gap:8px;align-items:baseline;padding:2px 0;opacity:0;animation:in .25s forwards}
+@keyframes in{to{opacity:1}}
+.ev .ico{width:16px;text-align:center;flex:0 0 auto;font-weight:800}
+.ev .t{color:var(--dim);font-size:10.5px;flex:0 0 auto;width:62px}
+.ev-goalstarted .ico{color:var(--accent)} .ev-taskdispatched .ico{color:var(--run)}
+.ev-taskvalidated .ico{color:var(--ok)} .ev-taskfailed .ico,.ev-goalfailed .ico{color:var(--bad)}
+.ev-goalcompleted .ico{color:var(--ok)}
+.empty{color:var(--dim);font-style:italic;padding:6px 2px}
+@media(max-width:720px){main{grid-template-columns:1fr}}
 </style></head><body>
-<header><h1>&#9889; Mythos Control Panel</h1><div id="status">connecting…</div></header>
+<header>
+  <div class="brand"><span class="reactor"></span><span>MYTHOS<small>CONTROL&nbsp;PANEL</small></span></div>
+  <div id="statusbar"><span class="chip dim">connecting…</span></div>
+</header>
 <main>
-<div class="panel">
-  <form id="f"><input type="text" id="goal" placeholder="Give the swarm a goal…" autocomplete="off">
-  <button>Run</button></form>
-</div>
-<div class="panel"><div class="dim">RUNS</div><div id="runs">none yet</div></div>
-<div class="panel" id="detail" hidden><div class="dim">RUN DETAIL</div><div id="detailBody"></div></div>
-<div class="panel"><div class="dim">LIVE EVENT STREAM (SSE)</div><div id="events" class="dim">waiting for events…</div></div>
+  <div class="panel span2">
+    <div class="label">NEW DIRECTIVE</div>
+    <form id="f"><input type="text" id="goal" placeholder="Give the swarm a goal…" autocomplete="off">
+    <button>Dispatch</button></form>
+  </div>
+  <div class="panel">
+    <div class="label">RUNS</div>
+    <div id="runs"><div class="empty">no runs yet</div></div>
+  </div>
+  <div class="panel">
+    <div class="label">LIVE EVENT STREAM · SSE</div>
+    <div id="events"><div class="empty">awaiting events…</div></div>
+  </div>
+  <div class="panel span2" id="detail" hidden>
+    <div class="label">RUN DETAIL · TASK LEDGER</div>
+    <div id="detailBody"></div>
+  </div>
 </main>
 <script>
 let selected=null;
 const $=id=>document.getElementById(id);
+const esc=t=>{const d=document.createElement('div');d.textContent=t==null?'':t;return d.innerHTML};
+const clk=s=>({validated:'completed',failed:'failed',dispatched:'running',pending:'queued'})[s]||'queued';
 async function jget(u){const r=await fetch(u);return r.json()}
+function statusBar(s){
+  if(!s.started)return '<span class="chip dim">swarm idle · starts on first goal</span>';
+  const p=s.posture||'NORMAL';
+  const roles=(s.roles||[]).map(r=>'<span class="chip">'+esc(r)+'</span>').join('');
+  return `<span class="pill p-${esc(p)}">${esc(p)}</span>`
+    +`<span class="chip">bus <b>${esc(s.bus)}</b></span>`
+    +`<span class="chip">matrix <b>${esc(s.matrix)}</b></span>`
+    +`<span class="chip">${s.dynamic?'<b>dynamic</b>':'wf <b>'+esc(s.workflow)+'</b>'}</span>`
+    +`<span class="chip">tok/h <b>${s.tokens_last_hour??0}</b></span>`
+    +roles;
+}
 async function refresh(){
   try{
     const s=await jget('/api/status');
-    $('status').textContent=s.started
-      ?`bus=${s.bus} · matrix=${s.matrix} · ${s.dynamic?'dynamic':'workflow: '+s.workflow} · roles: ${(s.roles||[]).join(', ')} · tokens/h: ${s.tokens_last_hour}`
-      :'swarm idle (starts on first goal)';
+    $('statusbar').innerHTML=statusBar(s);
     const d=await jget('/api/runs');
     $('runs').innerHTML=d.runs.length?d.runs.map(r=>
-      `<div class="run" onclick="select('${r.run_id}')">
+      `<div class="run ${r.run_id===selected?'sel':''}" onclick="select('${r.run_id}')">
         <span class="badge ${r.status}">${r.status}</span>
         <span class="goal">${esc(r.goal)}</span>
-        <span class="dim"> ${r.run_id} · ${r.submitted_at||''}</span></div>`).join(''):'none yet';
+        <span class="dim tiny">${(r.submitted_at||'').slice(11,19)}</span></div>`).join('')
+      :'<div class="empty">no runs yet</div>';
     if(selected)showDetail(await jget('/api/runs/'+selected));
-  }catch(e){$('status').textContent='dashboard error: '+e}
+  }catch(e){$('statusbar').innerHTML='<span class="chip" style="color:var(--bad)">error: '+esc(e)+'</span>'}
 }
-function esc(t){const d=document.createElement('div');d.textContent=t;return d.innerHTML}
-window.select=async id=>{selected=id;$('detail').hidden=false;
-  showDetail(await jget('/api/runs/'+id))}
+window.select=async id=>{selected=id;$('detail').hidden=false;showDetail(await jget('/api/runs/'+id));refresh()};
 function showDetail(r){
-  let h=`<p><span class="badge ${r.status}">${r.status}</span>
-    <span class="goal">${esc(r.goal)}</span></p>`;
-  if(r.ledger&&r.ledger.steps){h+=r.ledger.steps.map(s=>
-    `<div class="step"><span class="badge ${
-       {validated:'completed',failed:'failed',dispatched:'running',pending:'queued'}[s.status]||'queued'
-     }">${s.status}</span><span>[${esc(s.role)}] ${esc(s.objective)}</span>
-     <span class="dim">${s.attempts?('attempts: '+s.attempts):''}</span></div>`).join('')}
+  let h=`<div style="display:flex;gap:10px;align-items:center;margin-bottom:12px">
+    <span class="badge ${r.status}">${r.status}</span><b>${esc(r.goal)}</b></div>`;
+  if(r.ledger&&r.ledger.steps)h+=r.ledger.steps.map(s=>
+    `<div class="step"><span class="badge ${clk(s.status)}">${esc(s.status)}</span>
+     <span class="goal" style="white-space:normal">[${esc(s.role)}] ${esc(s.objective)}</span>
+     <span class="dim tiny">${s.attempts?('×'+s.attempts):''}</span></div>`).join('');
   if(r.conclusion)h+=`<pre>${esc(r.conclusion)}</pre>`;
-  if(r.error)h+=`<pre>${esc(r.error)}</pre>`;
+  if(r.error)h+=`<pre style="border-color:rgba(255,92,108,.4)">${esc(r.error)}</pre>`;
   $('detailBody').innerHTML=h;
 }
 $('f').addEventListener('submit',async e=>{
-  e.preventDefault();
-  const goal=$('goal').value.trim();if(!goal)return;
-  $('goal').value='';
+  e.preventDefault();const goal=$('goal').value.trim();if(!goal)return;$('goal').value='';
   const r=await fetch('/api/goals',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({goal})});
-  const run=await r.json();if(run.run_id)select(run.run_id);
-  refresh();
+  const run=await r.json();if(run.run_id)select(run.run_id);refresh();
 });
-// Real-time push: the SSE stream drives instant refreshes (no waiting for
-// the poll tick) and renders a live event log.
-const evLog=[];
-function connectSSE(){
+const ICON={'goal.started':'▶','task.dispatched':'→','task.validated':'✓',
+  'task.failed':'✗','goal.completed':'★','goal.failed':'✗'};
+let evEmpty=true;
+function onEvent(ev){
+  if(evEmpty){$('events').innerHTML='';evEmpty=false}
+  const cls='ev-'+(ev.kind||'').replace(/\./g,'');
+  const t=new Date().toTimeString().slice(0,8);
+  const row=document.createElement('div');row.className='ev '+cls;
+  row.innerHTML=`<span class="t mono">${t}</span><span class="ico">${ICON[ev.kind]||'·'}</span>`
+    +`<span class="mono">${esc(ev.kind)}${ev.role?(' ['+esc(ev.role)+']'):''}</span>`;
+  const c=$('events');c.insertBefore(row,c.firstChild);
+  while(c.children.length>60)c.removeChild(c.lastChild);
+  refresh();
+}
+(function connectSSE(){
   const src=new EventSource('/api/events');
   src.onmessage=e=>onEvent(JSON.parse(e.data));
-  ['goal.started','task.dispatched','task.validated','task.failed','goal.completed','goal.failed']
-    .forEach(k=>src.addEventListener(k,e=>onEvent(JSON.parse(e.data))));
-  src.onerror=()=>{/* EventSource auto-reconnects */};
-}
-function onEvent(ev){
-  const icon={'goal.started':'▶','task.dispatched':'→','task.validated':'✓',
-    'task.failed':'✗','goal.completed':'★','goal.failed':'✗'}[ev.kind]||'·';
-  const line=`${icon} ${ev.kind}${ev.role?(' ['+ev.role+']'):''}${ev.step!=null?(' #'+ev.step):''}`;
-  evLog.unshift(line);if(evLog.length>40)evLog.pop();
-  $('events').innerHTML=evLog.map(esc).join('<br>');
-  refresh(); // push-triggered refresh = immediate, not on the 1.5s tick
-}
-connectSSE();refresh();setInterval(refresh,2500);
-</script></body></html>
-"""
+  Object.keys(ICON).forEach(k=>src.addEventListener(k,e=>onEvent(JSON.parse(e.data))));
+  src.onerror=()=>{};
+})();
+refresh();setInterval(refresh,2500);
+</script></body></html>"""
