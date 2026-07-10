@@ -403,7 +403,14 @@ class Orchestrator:
             if update.task_id in task_ids:
                 return update
             # An update for a task we're not awaiting (earlier goal / stale
-            # run): keep it retrievable instead of dropping.
+            # run): keep it retrievable instead of dropping.  This is a keyed
+            # map, not a queue — a duplicate task_id would overwrite, so flag it
+            # rather than lose the earlier update silently.
+            if update.task_id in self._unmatched:
+                self._log(
+                    f"[Orchestrator] Overwriting buffered update for duplicate "
+                    f"task {update.task_id}"
+                )
             self._unmatched[update.task_id] = update
             self._log(f"[Orchestrator] Buffered update for task {update.task_id}")
 

@@ -254,6 +254,8 @@ class CriticAgent:
         conclusion = agent.run(prompt).strip()
 
         if captured:
+            # Last-wins (LIFO): submit_verdict is meant to be called once, but
+            # if the model calls it twice the most recent verdict is honored.
             passed, reason = captured[-1]
             return (True, "") if passed else (False, reason or conclusion)
 
