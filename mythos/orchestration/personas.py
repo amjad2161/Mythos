@@ -34,6 +34,8 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
 _BUILTIN_DIR = os.path.join(os.path.dirname(__file__), "personas")
+_LIBRARY_DIR = os.path.join(_BUILTIN_DIR, "library")
+_LIBRARY_META = frozenset({"ATTRIBUTION.md", "README.md"})
 _LIST_KEYS = ("rules", "success_metrics")
 _REQUIRED_KEYS = ("name", "role", "mission")
 
@@ -158,3 +160,82 @@ def builtin_personas(override_dir: str = "") -> Dict[str, Persona]:
 def get_persona(role: str, override_dir: str = "") -> Optional[Persona]:
     """Convenience lookup of a single role's persona."""
     return builtin_personas(override_dir).get(role)
+
+
+# ---------------------------------------------------------------------------
+# Specialist persona library (imported from the agency-agents persona set)
+# ---------------------------------------------------------------------------
+# The library uses a looser frontmatter (name/description/vibe + rich prose
+# body) than the strict role-persona schema above, so it gets a tolerant
+# parser.  These are reusable *specialist* identities (backend architect, RAG
+# engineer, UX architect, goal decomposer, …) that any run can adopt on top of
+# the core Mythos prompt — distinct from the per-role swarm personas.
+
+def parse_library_persona(text: str, slug: str) -> Persona:
+    """
+    Parse an agency-style specialist persona.  Tolerant by design: the only
+    structured data is the frontmatter ``name``/``description``; everything
+    else is free-form guidance kept verbatim in the body.  ``role`` is the
+    file slug and ``mission`` falls back to ``description``/``vibe``/first body
+    line so a persona is always renderable.
+    """
+    lines = text.splitlines()
+    fields: Dict[str, str] = {}
+    body_start = 0
+    if lines and lines[0].strip() == "---":
+        try:
+            end = next(i for i, line in enumerate(lines[1:], 1) if line.strip() == "---")
+        except StopIteration:
+            raise PersonaError("unterminated frontmatter block (missing closing '---')") from None
+        for raw in lines[1:end]:
+            stripped = raw.strip()
+            if not stripped or stripped.startswith("- ") or ":" not in stripped:
+                continue
+            key, _, value = stripped.partition(":")
+            fields[key.strip()] = value.strip().strip('"')
+        body_start = end + 1
+
+    body = "\n".join(lines[body_start:]).strip()
+    name = fields.get("name") or slug.replace("-", " ").title()
+    mission = (
+        fields.get("description")
+        or fields.get("vibe")
+        or (body.splitlines()[0].strip() if body.strip() else name)
+    )
+    return Persona(name=name, role=slug, mission=mission, body=body)
+
+
+def load_library(directory: str = "") -> Dict[str, Persona]:
+    """Load every specialist persona in the library, keyed by file slug."""
+    directory = directory or _LIBRARY_DIR
+    library: Dict[str, Persona] = {}
+    if not os.path.isdir(directory):
+        return library
+    for entry in sorted(os.listdir(directory)):
+        if not entry.endswith(".md") or entry in _LIBRARY_META:
+            continue
+        slug = entry[:-3]
+        path = os.path.join(directory, entry)
+        with open(path, "r", encoding="utf-8") as fh:
+            try:
+                library[slug] = parse_library_persona(fh.read(), slug)
+            except PersonaError as exc:
+                raise PersonaError(f"{path}: {exc}") from exc
+    return library
+
+
+def list_library(directory: str = "") -> List[str]:
+    """Sorted slugs of the available specialist personas."""
+    return sorted(load_library(directory).keys())
+
+
+def get_library_persona(name: str, directory: str = "") -> Optional[Persona]:
+    """Look up a specialist persona by slug or display name (case-insensitive)."""
+    library = load_library(directory)
+    if name in library:
+        return library[name]
+    needle = name.strip().lower()
+    for persona in library.values():
+        if persona.role.lower() == needle or persona.name.lower() == needle:
+            return persona
+    return None

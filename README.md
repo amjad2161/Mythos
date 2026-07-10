@@ -58,6 +58,22 @@ Try it offline (no API key needed) with the deterministic stub backend:
 python main.py --provider stub "smoke test"
 ```
 
+Run it on a **free / local model** (Ollama, LM Studio, llama.cpp, vLLM, Groq) —
+any OpenAI-compatible endpoint, no API key, no extra dependencies:
+
+```bash
+ollama serve && ollama pull llama3.1        # or any local server
+python main.py --provider local --model llama3.1 "Write a haiku about the sea"
+# point elsewhere with MYTHOS_LOCAL_URL=http://host:port/v1
+```
+
+Adopt a **specialist persona** from the bundled library for a single run:
+
+```bash
+python main.py --list-personas                       # 24 specialists
+python main.py --persona engineering-backend-architect "Design a rate limiter"
+```
+
 ## Engineering dossier
 
 The full delivery documentation set lives in [`docs/`](docs/):
@@ -186,7 +202,9 @@ Everything is configurable via `MythosConfig`, CLI flags, or environment variabl
 |-----------------------------|------------------------|---------|
 | `ANTHROPIC_API_KEY`         | —                      | API key for the default Claude backend |
 | `MYTHOS_API_KEY`            | —                      | Overrides the API key for any provider |
-| `MYTHOS_LLM_PROVIDER`       | `anthropic`            | `anthropic` \| `openai` \| `stub` |
+| `MYTHOS_LLM_PROVIDER`       | `anthropic`            | `anthropic` \| `openai` \| `local` \| `stub` |
+| `MYTHOS_LOCAL_URL`          | `http://localhost:11434/v1` | OpenAI-compatible base URL for `--provider local`/`ollama` (Ollama, LM Studio, llama.cpp, vLLM, Groq) |
+| `MYTHOS_LOCAL_API_KEY`      | `local`                | Bearer token for the local endpoint (most local servers ignore it) |
 | `MYTHOS_LLM_MODEL`          | `claude-opus-4-8`      | Model ID |
 | `MYTHOS_LLM_MAX_TOKENS`     | `8192`                | Max output tokens per LLM call |
 | `MYTHOS_LLM_TEMPERATURE`    | `0.2`                  | Sampling temperature (OpenAI backend only; current Claude models don't accept it) |

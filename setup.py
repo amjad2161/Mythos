@@ -27,7 +27,7 @@ setup(
     license="MIT",
     url="https://github.com/amjad2161/Mythos",
     packages=find_packages(exclude=["tests*"]),
-    package_data={"mythos.orchestration": ["personas/*.md"]},
+    package_data={"mythos.orchestration": ["personas/*.md", "personas/library/*.md"]},
     py_modules=["main"],   # the `mythos` console script imports the top-level main module
     python_requires=">=3.9",
     install_requires=[

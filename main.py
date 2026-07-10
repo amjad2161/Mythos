@@ -36,7 +36,7 @@ def parse_args() -> argparse.Namespace:
             Environment variables:
               ANTHROPIC_API_KEY       Anthropic API key (used by the default Claude backend)
               MYTHOS_API_KEY          Override API key for any LLM provider
-              MYTHOS_LLM_PROVIDER     LLM provider (anthropic | openai | stub)  [default: anthropic]
+              MYTHOS_LLM_PROVIDER     LLM provider (anthropic | openai | local | stub)  [default: anthropic]
               MYTHOS_LLM_MODEL        Model name  [default: claude-opus-4-5]
               MYTHOS_LLM_TEMPERATURE  Sampling temperature (0.0 – 1.0)
               MYTHOS_MAX_ITERATIONS   Hard iteration cap (default: 50)
@@ -52,8 +52,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--provider",
         default=None,
-        choices=["openai", "anthropic", "stub"],
-        help="LLM provider to use (overrides MYTHOS_LLM_PROVIDER).",
+        choices=["openai", "anthropic", "local", "ollama", "stub"],
+        help=(
+            "LLM provider to use (overrides MYTHOS_LLM_PROVIDER). "
+            "'local'/'ollama' target any OpenAI-compatible endpoint "
+            "(MYTHOS_LOCAL_URL, default Ollama on localhost:11434)."
+        ),
     )
     parser.add_argument(
         "--model",
@@ -119,6 +123,22 @@ def parse_args() -> argparse.Namespace:
             "Decompose the goal dynamically with a routing LLM instead of a "
             "rigid workflow (the named --workflow becomes the fallback)."
         ),
+    )
+
+    persona_group = parser.add_argument_group("persona library")
+    persona_group.add_argument(
+        "--persona",
+        metavar="NAME",
+        default=None,
+        help=(
+            "Adopt a specialist persona from the library (e.g. "
+            "engineering-backend-architect) for a single-agent run."
+        ),
+    )
+    persona_group.add_argument(
+        "--list-personas",
+        action="store_true",
+        help="List the available specialist personas and exit.",
     )
 
     kb_group = parser.add_argument_group("knowledge base")
@@ -197,6 +217,19 @@ def build_config(args: argparse.Namespace) -> MythosConfig:
         config.verbose = False
     elif args.verbose:
         config.verbose = True
+
+    if getattr(args, "persona", None):
+        from mythos.orchestration.personas import get_library_persona  # noqa: PLC0415
+
+        persona = get_library_persona(args.persona)
+        if persona is None:
+            from mythos.orchestration.personas import list_library  # noqa: PLC0415
+
+            raise SystemExit(
+                f"error: unknown persona '{args.persona}'. "
+                f"Run --list-personas to see the {len(list_library())} available."
+            )
+        config.system_suffix = persona.compile_system_suffix()
 
     return config
 
@@ -354,6 +387,16 @@ def main() -> int:
     if args.version:
         from mythos import __version__  # noqa: PLC0415
         print(f"Mythos {__version__}")
+        return 0
+
+    if args.list_personas:
+        from mythos.orchestration.personas import load_library  # noqa: PLC0415
+
+        library = load_library()
+        print(f"Specialist personas ({len(library)}):\n")
+        for slug, persona in library.items():
+            print(f"  {slug}\n    {persona.mission[:100]}")
+        print("\nUse one with:  python main.py --persona <name> \"your goal\"")
         return 0
 
     # PC quality-of-life: pick up ~/.mythos/env and ./.env before anything
